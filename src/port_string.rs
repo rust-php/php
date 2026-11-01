@@ -10,6 +10,8 @@ pub mod util;
 mod ctype;
 #[path = "ps/core1.rs"]
 mod core1;
+#[path = "ps/core2.rs"]
+mod core2;
 #[path = "ps/fmt.rs"]
 mod fmt;
 #[path = "ps/consts.rs"]
@@ -27,4 +29,5 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     ctype::register(m);
     fmt::register(m);
     core1::register(m);
+    core2::register(m);
 }
