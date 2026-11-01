@@ -83,7 +83,7 @@ pub fn constant(name: &str) -> Option<Value> {
         "E_WARNING" => Value::Int(2),
         "E_NOTICE" => Value::Int(8),
         "E_STRICT" => Value::Int(2048),
-        _ => return None,
+        _ => return crate::port_array::constant(name),
     })
 }
 
