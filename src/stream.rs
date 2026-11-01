@@ -12,6 +12,8 @@ thread_local! {
 }
 
 pub enum Stream {
+    /// A user stream wrapper object (streamWrapper class). All I/O is forwarded to its methods by the VM.
+    User { obj: crate::value::Value },
     File { file: File, path: String, mode: String, rbuf: Vec<u8>, rpos: usize, eof: bool },
     Memory { data: Vec<u8>, pos: usize, eof: bool },
     Stdin,

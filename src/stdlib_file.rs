@@ -388,8 +388,19 @@ pub fn register_simple(m: &mut HashMap<&'static str, Builtin>) {
 
 pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     let list: &[(&str, VmBuiltin)] = &[
-        ("fopen", |_, a| {
+        ("fopen", |vm, a| {
             let (path, mode) = (arg(&a, 0).to_str(), arg(&a, 1).to_str());
+            if let Some(scheme) = path.split_once("://").map(|(s, _)| s.to_ascii_lowercase()) {
+                if let Some(class_name) = vm.stream_wrappers.get(&scheme).cloned() {
+                    let class = vm.find_class(&class_name)?;
+                    let obj = vm.instantiate(&class, vec![])?;
+                    let opened = vm.call_method_named(&obj, "stream_open", vec![Value::str(&path), Value::str(&mode), Value::Int(0), Value::Null])?;
+                    if !opened.to_bool() {
+                        return Ok(Value::Bool(false));
+                    }
+                    return Ok(Value::Resource(Resource::new(crate::stream::Stream::User { obj }, "stream")));
+                }
+            }
             Ok(match Stream::open(&path, &mode) {
                 Some(st) => Value::Resource(Resource::new(st, "stream")),
                 None => Value::Bool(false),
@@ -604,6 +615,51 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     for (k, f) in list {
         m.insert(k, *f);
     }
+}
+
+/// Forward a stream function on a user-wrapper resource to the wrapper object's methods (streamWrapper API).
+pub fn user_stream_op(vm: &mut Vm<'_>, name: &str, r: Rc<Resource>, args: &[Value]) -> Option<R<Value>> {
+    let obj = match &*r.stream.borrow() {
+        Some(crate::stream::Stream::User { obj }) => obj.clone(),
+        _ => return None,
+    };
+    let call = |vm: &mut Vm<'_>, m: &str, a: Vec<Value>| vm.call_method_named(&obj, m, a);
+    let arg_at = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
+    let r_val = match name {
+        "fread" => call(vm, "stream_read", vec![Value::Int(arg_at(1).to_int())]).map(|v| if matches!(v, Value::Bool(false)) { Value::str("") } else { v }),
+        "fwrite" | "fputs" => {
+            let data = arg_at(1).to_str();
+            call(vm, "stream_write", vec![Value::Str(data.clone())]).map(|v| if matches!(v, Value::Bool(_) | Value::Null) { Value::Int(data.len() as i64) } else { v })
+        }
+        "fgets" => {
+            let mut out = String::new();
+            loop {
+                let c = match call(vm, "stream_read", vec![Value::Int(1)]) {
+                    Ok(v) => v.to_str().to_string(),
+                    Err(e) => return Some(Err(e)),
+                };
+                if c.is_empty() {
+                    break;
+                }
+                out.push_str(&c);
+                if c == "\n" {
+                    break;
+                }
+            }
+            Ok(if out.is_empty() { Value::Bool(false) } else { Value::str(&out) })
+        }
+        "feof" => call(vm, "stream_eof", vec![]).map(|v| Value::Bool(v.to_bool())),
+        "ftell" => call(vm, "stream_tell", vec![]),
+        "fseek" => call(vm, "stream_seek", vec![arg_at(1), Value::Int(if args.len() > 2 { arg_at(2).to_int() } else { 0 })]).map(|v| Value::Int(if v.to_bool() { 0 } else { -1 })),
+        "fflush" => call(vm, "stream_flush", vec![]).map(|v| Value::Bool(v.to_bool())),
+        "fclose" => {
+            let res = call(vm, "stream_close", vec![]).map(|_| Value::Bool(true));
+            *r.stream.borrow_mut() = None;
+            res
+        }
+        _ => return None,
+    };
+    Some(r_val)
 }
 
 fn vm_call(vm: &mut Vm<'_>, name: &str, a: Vec<Value>) -> R<Value> {

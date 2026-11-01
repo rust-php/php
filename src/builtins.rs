@@ -509,6 +509,11 @@ pub fn exists(name: &str) -> bool {
 }
 
 pub fn call(vm: &mut Vm<'_>, name: &str, args: Vec<Value>) -> Option<Result<Value, Flow>> {
+    if let Some(Value::Resource(r)) = args.first() {
+        if let Some(res) = crate::stdlib_file::user_stream_op(vm, name, r.clone(), &args) {
+            return Some(res);
+        }
+    }
     if let Some(f) = vm_table().get(name) {
         return Some(f(vm, args));
     }
@@ -1052,6 +1057,15 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
             ("trait_exists", |vm, a| bool_v(vm.classes.get(&arg(&a, 0).to_str().to_ascii_lowercase()).is_some_and(|c| c.kind == crate::ast::ClassKind::Trait))),
             ("debug_backtrace", |_, _| Ok(arr(vec![]))),
             ("debug_print_backtrace", |_, _| Ok(Value::Null)),
+            ("stream_wrapper_register", |vm, a| {
+                let scheme = arg(&a, 0).to_str().to_string();
+                let class = arg(&a, 1).to_str().to_string();
+                if vm.stream_wrappers.contains_key(&scheme) {
+                    return Ok(Value::Bool(false));
+                }
+                vm.stream_wrappers.insert(scheme, class);
+                bool_v(true)
+            }),
             ("gc_collect_cycles", |_, _| Ok(Value::Int(0))),
             ("gc_enable", |_, _| Ok(Value::Null)),
             ("gc_disable", |_, _| Ok(Value::Null)),

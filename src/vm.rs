@@ -78,6 +78,8 @@ pub struct Vm<'p> {
     pub shutdown: Vec<(Value, Vec<Value>)>,
     pub fiber_stack: Vec<Value>,
     pub json_error: (i64, &'static str),
+    /// stream_wrapper_register(): scheme -> class name.
+    pub stream_wrappers: HashMap<String, String>,
     /// Output-buffer stack (`ob_start`); the last entry receives output.
     pub ob: Vec<String>,
     statics: HashMap<u32, Rc<RefCell<Value>>>,
@@ -96,7 +98,7 @@ impl<'p> Vm<'p> {
         // SAFETY: the program is only extended (never shrunk or reordered) while running; funcs are boxed so
         // references to existing functions stay valid.
         let prog: &'p Program = unsafe { &*prog_ptr };
-        Vm { prog, prog_ptr, included: Default::default(), out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), json_error: (0, "No error"), ob: Vec::new(), statics: HashMap::new(), depth: 0 }
+        Vm { prog, prog_ptr, included: Default::default(), out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), json_error: (0, "No error"), stream_wrappers: HashMap::new(), ob: Vec::new(), statics: HashMap::new(), depth: 0 }
     }
 
     /// Append to the active output buffer, or to the real output.
