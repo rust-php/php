@@ -4,6 +4,8 @@ use crate::vm::{Flow, Vm};
 use crate::object::Extra;
 use std::{collections::HashMap, rc::Rc, sync::OnceLock};
 
+pub use crate::refbuiltins::{call_ref, ref_positions};
+
 type Res = Result<Value, String>;
 type Builtin = fn(&mut Vm<'_>, Vec<Value>) -> Res;
 
@@ -48,6 +50,12 @@ pub fn constant(name: &str) -> Option<Value> {
         "STR_PAD_RIGHT" => Value::Int(1),
         "STR_PAD_LEFT" => Value::Int(0),
         "STR_PAD_BOTH" => Value::Int(2),
+        "SORT_REGULAR" => Value::Int(0),
+        "SORT_NUMERIC" => Value::Int(1),
+        "SORT_STRING" => Value::Int(2),
+        "COUNT_RECURSIVE" => Value::Int(1),
+        "ARRAY_FILTER_USE_KEY" => Value::Int(2),
+        "ARRAY_FILTER_USE_BOTH" => Value::Int(1),
         "E_ALL" => Value::Int(32767),
         "E_ERROR" => Value::Int(1),
         "E_WARNING" => Value::Int(2),
@@ -245,6 +253,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
                 Value::Str(_) => "string",
                 Value::Array(_) => "array",
                 Value::Object(_) => "object",
+                Value::Ref(_) => "reference",
             }))),
             ("intval", |_, a| Ok(Value::Int(arg(&a, 0).to_int()))),
             ("floatval", |_, a| Ok(Value::Float(arg(&a, 0).to_float()))),
@@ -657,6 +666,7 @@ fn sprintf(a: &[Value]) -> Result<String, String> {
 fn var_dump(v: &Value, ind: usize, out: &mut String) {
     let pad = " ".repeat(ind);
     match v {
+        Value::Ref(r) => var_dump(&r.borrow(), ind, out),
         Value::Null => out.push_str(&format!("{pad}NULL\n")),
         Value::Bool(b) => out.push_str(&format!("{pad}bool({b})\n")),
         Value::Int(i) => out.push_str(&format!("{pad}int({i})\n")),
@@ -734,6 +744,7 @@ fn print_r(v: &Value, ind: usize, out: &mut String) {
 fn var_export(v: &Value, ind: usize, out: &mut String) {
     let pad = " ".repeat(ind);
     match v {
+        Value::Ref(r) => var_export(&r.borrow(), ind, out),
         Value::Null => out.push_str("NULL"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(i) => out.push_str(&i.to_string()),
@@ -904,6 +915,24 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
                 }
                 Ok(Value::Array(Rc::new(out)))
             }),
+            ("current", |_, a| match arg(&a, 0) {
+                Value::Array(x) => Ok(x.entry_at(x.ptr).map(|(_, _, v)| v.clone()).unwrap_or(Value::Bool(false))),
+                _ => Ok(Value::Bool(false)),
+            }),
+            ("key", |_, a| match arg(&a, 0) {
+                Value::Array(x) => Ok(x.entry_at(x.ptr).map(|(_, k, _)| k.to_value()).unwrap_or(Value::Null)),
+                _ => Ok(Value::Null),
+            }),
+            ("array_fill_keys", |_, a| {
+                let mut out = PhpArray::new();
+                for (_, k) in need_arr(&a, 0, "array_fill_keys")?.iter() {
+                    out.set(Key::from_value(k)?, arg(&a, 1));
+                }
+                Ok(Value::Array(Rc::new(out)))
+            }),
+            ("assert", |_, _| bool_v(true)),
+            ("spl_autoload_register", |_, _| bool_v(true)),
+            ("get_called_class", |_, _| bool_v(false)),
             ("is_object", |_, a| bool_v(matches!(arg(&a, 0), Value::Object(_)))),
             ("get_class", |vm, a| match arg(&a, 0) {
                 Value::Object(o) => Ok(s(&o.class.name)),

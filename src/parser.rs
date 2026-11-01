@@ -126,7 +126,11 @@ impl Parser {
     fn expr_list(&mut self, end: &str) -> R<Vec<Expr>> {
         let mut v = Vec::new();
         while !self.is_op(end) {
-            v.push(self.expr(0)?);
+            if self.eat_op("...") {
+                v.push(Expr::Spread(boxed(self.expr(0)?)));
+            } else {
+                v.push(self.expr(0)?);
+            }
             if !self.eat_op(",") {
                 break;
             }
@@ -228,13 +232,15 @@ impl Parser {
                     return Err("syntax error, expecting \"as\"".into());
                 }
                 let mut key = None;
+                let mut by_ref = self.eat_op("&");
                 let mut val = self.var_name()?;
                 if self.eat_op("=>") {
                     key = Some(val);
+                    by_ref = self.eat_op("&");
                     val = self.var_name()?;
                 }
                 self.expect_op(")")?;
-                Ok(Stmt::Foreach { subject, key, val, body: self.body()? })
+                Ok(Stmt::Foreach { subject, key, val, by_ref, body: self.body()? })
             }
             "switch" => {
                 self.pos += 1;
@@ -322,6 +328,29 @@ impl Parser {
                     }
                 }
                 Ok(Stmt::Try { body, catches, finally })
+            }
+            "global" if matches!(self.peek_at(1), Tok::Var(_)) => {
+                self.pos += 1;
+                let mut names = vec![self.var_name()?];
+                while self.eat_op(",") {
+                    names.push(self.var_name()?);
+                }
+                self.end_stmt()?;
+                Ok(Stmt::Global(names))
+            }
+            "static" if matches!(self.peek_at(1), Tok::Var(_)) => {
+                self.pos += 1;
+                let mut vars = Vec::new();
+                loop {
+                    let name = self.var_name()?;
+                    let init = if self.eat_op("=") { Some(self.expr(4)?) } else { None };
+                    vars.push((name, init));
+                    if !self.eat_op(",") {
+                        break;
+                    }
+                }
+                self.end_stmt()?;
+                Ok(Stmt::StaticVar(vars))
             }
             "namespace" if !matches!(self.peek_at(1), Tok::Op("\\")) => {
                 self.pos += 1;
@@ -515,12 +544,11 @@ impl Parser {
                 }
                 self.pos += 1;
             }
-            if self.is_op("&") || self.is_op("...") {
-                return Err("by-reference and variadic parameters are not supported yet".into());
-            }
+            let by_ref = self.eat_op("&");
+            let variadic = self.eat_op("...");
             let name = self.var_name()?;
             let default = if self.eat_op("=") { Some(self.expr(4)?) } else { None };
-            params.push(Param { name, default, promote });
+            params.push(Param { name, default, promote, by_ref, variadic });
             if !self.eat_op(",") {
                 self.expect_op(")")?;
                 break;
@@ -812,10 +840,8 @@ impl Parser {
         if !arrow && self.eat_kw("use") {
             self.expect_op("(")?;
             while !self.eat_op(")") {
-                if self.is_op("&") {
-                    return Err("by-reference closure captures are not supported yet".into());
-                }
-                uses.push(self.var_name()?);
+                let by_ref = self.eat_op("&");
+                uses.push((self.var_name()?, by_ref));
                 self.eat_op(",");
             }
         }
@@ -871,8 +897,9 @@ impl Parser {
             if let Tok::Op(o) = self.peek().clone() {
                 if o == "=" {
                     self.pos += 1;
-                    if self.is_op("&") {
-                        return Err("reference assignment is not supported yet".into());
+                    if self.eat_op("&") {
+                        let rhs = self.postfix_no_assign()?;
+                        return Ok(Expr::AssignRef(boxed(e), boxed(rhs)));
                     }
                     let rhs = self.expr(4)?;
                     return Ok(Expr::Assign(boxed(e), boxed(rhs)));
@@ -922,6 +949,13 @@ impl Parser {
     fn array_lit(&mut self, end: &str) -> R<Expr> {
         let mut items = Vec::new();
         while !self.is_op(end) {
+            if self.eat_op("...") {
+                items.push((None, Expr::Spread(boxed(self.expr(0)?))));
+                if !self.eat_op(",") {
+                    break;
+                }
+                continue;
+            }
             let first = self.expr(0)?;
             if self.eat_op("=>") {
                 items.push((Some(first), self.expr(0)?));

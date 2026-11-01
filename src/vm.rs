@@ -48,6 +48,8 @@ pub struct Vm<'p> {
     pub file: String,
     pub classes: HashMap<String, Rc<Class>>,
     pub constants: HashMap<String, Value>,
+    pub globals: HashMap<String, Rc<RefCell<Value>>>,
+    statics: HashMap<u32, Rc<RefCell<Value>>>,
     depth: usize,
 }
 
@@ -59,7 +61,7 @@ fn lc(s: &str) -> String {
 
 impl<'p> Vm<'p> {
     pub fn new(prog: &'p Program) -> Self {
-        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), depth: 0 }
+        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), statics: HashMap::new(), depth: 0 }
     }
 
     pub fn run_main(&mut self) -> R<()> {
@@ -416,11 +418,29 @@ impl<'p> Vm<'p> {
             locals[0] = t.clone();
         }
         let argc = args.len();
-        for (i, a) in args.into_iter().take(f.nparams).enumerate() {
-            locals[1 + i] = a;
+        let mut it = args.into_iter();
+        for i in 0..f.nparams {
+            let by_ref = f.ref_params.get(i).copied().unwrap_or(false);
+            if f.variadic && i + 1 == f.nparams {
+                let rest: Vec<Value> = it.by_ref().map(|a| if by_ref { a } else { unref(a) }).collect();
+                locals[1 + i] = Value::Array(Rc::new(PhpArray::from_list(rest)));
+                break;
+            }
+            match it.next() {
+                Some(a) => locals[1 + i] = if by_ref { a } else { unref(a) },
+                None => break,
+            }
         }
         for (slot, v) in f.capture_slots.iter().zip(ctx.caps.iter()) {
             locals[*slot as usize] = v.clone();
+        }
+        if std::ptr::eq(f, &self.prog.main) {
+            for name in &self.prog.global_names {
+                if let Some(&slot) = self.prog.main_locals.get(name) {
+                    let cell = self.globals.entry(name.clone()).or_insert_with(|| Rc::new(RefCell::new(Value::Null))).clone();
+                    locals[slot as usize] = Value::Ref(cell);
+                }
+            }
         }
         let mut fr = Frame { locals, st: Vec::with_capacity(16), pc: 0, argc, ctx };
         loop {
@@ -461,8 +481,14 @@ impl<'p> Vm<'p> {
             fr.pc += 1;
             match op {
                 Op::Const(k) => fr.st.push(prog.consts[k as usize].clone()),
-                Op::Load(s) => fr.st.push(fr.locals[s as usize].clone()),
-                Op::Store(s) => fr.locals[s as usize] = fr.st.last().cloned().unwrap_or(Value::Null),
+                Op::Load(s) => {
+                    let v = get_local(&fr.locals, s);
+                    fr.st.push(v);
+                }
+                Op::Store(s) => {
+                    let v = fr.st.last().cloned().unwrap_or(Value::Null);
+                    set_local(&mut fr.locals, s, v);
+                }
                 Op::Pop => {
                     fr.st.pop();
                 }
@@ -572,7 +598,7 @@ impl<'p> Vm<'p> {
                     let shape = &prog.shapes[shape as usize];
                     let n = shape.iter().filter(|b| **b).count();
                     let mut vals = split_args!(n).into_iter();
-                    if let Value::Object(o) = fr.locals[slot as usize].clone() {
+                    if let Value::Object(o) = get_local(&fr.locals, slot) {
                         let key = vals.next().unwrap_or(Value::Null);
                         match o.class.find_method("offsetset") {
                             Some(m) => self.call_method(&Value::Object(o), &m, vec![key, v.clone()])?,
@@ -585,9 +611,7 @@ impl<'p> Vm<'p> {
                     for has in shape {
                         keys.push(if *has { Some(Key::from_value(&vals.next().unwrap())?) } else { None });
                     }
-                    let mut cur = std::mem::replace(&mut fr.locals[slot as usize], Value::Null);
-                    let r = assign_dim(&mut cur, &keys, v.clone());
-                    fr.locals[slot as usize] = cur;
+                    let r = with_local_mut(&mut fr.locals, slot, |cur| assign_dim(cur, &keys, v.clone()));
                     r?;
                     fr.st.push(v);
                 }
@@ -595,12 +619,12 @@ impl<'p> Vm<'p> {
                     let n = prog.shapes[shape as usize].len();
                     let ks = split_args!(n);
                     let keys: Vec<Key> = ks.iter().map(Key::from_value).collect::<Result<_, _>>()?;
-                    unset_dim(&mut fr.locals[slot as usize], &keys);
+                    with_local_mut(&mut fr.locals, slot, |cur| unset_dim(cur, &keys));
                 }
                 Op::IncDec(slot, inc, prefix) => {
-                    let old = fr.locals[slot as usize].clone();
+                    let old = get_local(&fr.locals, slot);
                     let new = incdec(&old, inc);
-                    fr.locals[slot as usize] = new.clone();
+                    set_local(&mut fr.locals, slot, new.clone());
                     fr.st.push(if prefix { new } else { old });
                 }
                 Op::IterNext { arr, pos, key, val, exit } => {
@@ -619,17 +643,49 @@ impl<'p> Vm<'p> {
                         Some((i, k, v)) => {
                             fr.locals[pos as usize] = Value::Int(i as i64 + 1);
                             if key != NO_SLOT {
-                                fr.locals[key as usize] = k;
+                                set_local(&mut fr.locals, key, k);
                             }
-                            fr.locals[val as usize] = v;
+                            set_local(&mut fr.locals, val, v);
                         }
                         None => fr.pc = exit as usize,
                     }
                 }
-                Op::Call(k, argc) => {
-                    let args = split_args!(argc);
+                Op::IterNextRef { arr, pos, key, val, exit } => {
+                    let cell = match &fr.locals[arr as usize] {
+                        Value::Ref(r) => r.clone(),
+                        _ => {
+                            fr.pc = exit as usize;
+                            continue;
+                        }
+                    };
+                    let p = fr.locals[pos as usize].to_int() as usize;
+                    write_back_elem(&cell, &fr.locals[val as usize], p);
+                    let step = match &*cell.borrow() {
+                        Value::Array(a) => a.entry_at(p).map(|(i, k, v)| (i, k.to_value(), v.clone())),
+                        _ => None,
+                    };
+                    match step {
+                        Some((i, k, v)) => {
+                            fr.locals[pos as usize] = Value::Int(i as i64 + 1);
+                            if key != NO_SLOT {
+                                set_local(&mut fr.locals, key, k);
+                            }
+                            fr.locals[val as usize] = Value::Ref(Rc::new(RefCell::new(v)));
+                        }
+                        None => fr.pc = exit as usize,
+                    }
+                }
+                Op::RefFlush { arr, pos, val } => {
+                    if let Value::Ref(cell) = fr.locals[arr as usize].clone() {
+                        let p = fr.locals[pos as usize].to_int() as usize;
+                        write_back_elem(&cell, &fr.locals[val as usize], p);
+                    }
+                }
+                Op::Call(k, argc, site) => {
+                    let mut args = split_args!(argc);
                     let Value::Str(name) = &prog.consts[k as usize] else { unreachable!() };
                     let r = if let Some(&idx) = prog.func_index.get(&**name) {
+                        self.bind_ref_args(fr, site, Some(idx), &mut args);
                         self.call_func(idx, args, CallCtx::default())?
                     } else if let Some(r) = builtins::call(self, name, args) {
                         r?
@@ -638,9 +694,14 @@ impl<'p> Vm<'p> {
                     };
                     fr.st.push(r);
                 }
-                Op::CallValue(argc) => {
-                    let args = split_args!(argc);
+                Op::CallValue(argc, site) => {
+                    let mut args = split_args!(argc);
                     let callee = pop!();
+                    if let Value::Object(o) = &callee {
+                        if let Extra::Closure(cd) = &*o.extra.borrow() {
+                            self.bind_ref_args(fr, site, Some(cd.func), &mut args);
+                        }
+                    }
                     let r = self.call_value(&callee, args)?;
                     fr.st.push(r);
                 }
@@ -666,6 +727,91 @@ impl<'p> Vm<'p> {
                     }
                 }
                 Op::Halt => return Ok(Value::Null),
+                Op::MakeRef(slot) => {
+                    let cell = make_ref_cell(&mut fr.locals[slot as usize]);
+                    fr.st.push(Value::Ref(cell));
+                }
+                Op::BindRef(slot) => {
+                    let v = pop!();
+                    fr.locals[slot as usize] = v;
+                }
+                Op::GlobalBind(slot, k) => {
+                    let Value::Str(name) = &prog.consts[k as usize] else { unreachable!() };
+                    let cell = self.globals.entry(name.to_string()).or_insert_with(|| Rc::new(RefCell::new(Value::Null))).clone();
+                    fr.locals[slot as usize] = Value::Ref(cell);
+                }
+                Op::StaticBind(slot, key, skip) => {
+                    if let Some(cell) = self.statics.get(&key) {
+                        fr.locals[slot as usize] = Value::Ref(cell.clone());
+                        fr.pc = skip as usize;
+                    }
+                }
+                Op::StaticInit(slot, key) => {
+                    let v = pop!();
+                    let cell = Rc::new(RefCell::new(v));
+                    self.statics.insert(key, cell.clone());
+                    fr.locals[slot as usize] = Value::Ref(cell);
+                }
+                Op::CallRef(k, argc) => {
+                    let mut args = split_args!(argc);
+                    let Value::Str(name) = &prog.consts[k as usize] else { unreachable!() };
+                    let r = match builtins::call_ref(self, name, &mut args) {
+                        Some(r) => r?,
+                        None => return self.throw_error("Error", &format!("Call to undefined function {name}()")),
+                    };
+                    fr.st.push(r);
+                    for p in builtins::ref_positions(name) {
+                        if *p < argc as usize {
+                            fr.st.push(args.get(*p).cloned().unwrap_or(Value::Null));
+                        }
+                    }
+                }
+                Op::ArrSpread => {
+                    let src = pop!();
+                    let items = self.spread_items(&src)?;
+                    if let Some(Value::Array(a)) = fr.st.last_mut() {
+                        let arr = Rc::make_mut(a);
+                        for (k, v) in items {
+                            match k {
+                                Key::Int(_) => arr.push(v),
+                                k => arr.set(k, v),
+                            }
+                        }
+                    }
+                }
+                Op::CallSpread(kind, k, forward) => {
+                    let list = pop!();
+                    let args: Vec<Value> = match &list {
+                        Value::Array(a) => a.iter().map(|(_, v)| v.clone()).collect(),
+                        _ => vec![],
+                    };
+                    let r = match kind {
+                        0 => {
+                            let Value::Str(name) = &prog.consts[k as usize] else { unreachable!() };
+                            self.call_function_named(name, args)?
+                        }
+                        1 => {
+                            let callee = pop!();
+                            self.call_value(&callee, args)?
+                        }
+                        2 => {
+                            let name = pop!().to_str();
+                            let obj = pop!();
+                            self.call_method_named(&obj, &name, args)?
+                        }
+                        3 => {
+                            let name = pop!().to_str();
+                            let cv = pop!();
+                            self.call_static_op(fr, &cv, &name, args, forward)?
+                        }
+                        _ => {
+                            let cv = pop!();
+                            let class = self.class_of(&cv)?;
+                            self.instantiate(&class, args)?
+                        }
+                    };
+                    fr.st.push(r);
+                }
                 Op::PushSelf => match &fr.ctx.self_class {
                     Some(c) => fr.st.push(Value::str(&c.name)),
                     None => return self.throw_error("Error", "Cannot use \"self\" when no class scope is active"),
@@ -678,10 +824,12 @@ impl<'p> Vm<'p> {
                     Some(c) => fr.st.push(Value::str(&c.name)),
                     None => return self.throw_error("Error", "Cannot use \"static\" when no class scope is active"),
                 },
-                Op::New(argc) => {
-                    let args = split_args!(argc);
+                Op::New(argc, site) => {
+                    let mut args = split_args!(argc);
                     let cv = pop!();
                     let class = self.class_of(&cv)?;
+                    let ctor = class.find_method("__construct").map(|m| m.func);
+                    self.bind_ref_args(fr, site, ctor, &mut args);
                     let obj = self.instantiate(&class, args)?;
                     fr.st.push(obj);
                 }
@@ -741,17 +889,25 @@ impl<'p> Vm<'p> {
                     r?;
                     fr.st.push(v);
                 }
-                Op::CallMethod(argc) => {
-                    let args = split_args!(argc);
+                Op::CallMethod(argc, site) => {
+                    let mut args = split_args!(argc);
                     let name = pop!().to_str();
                     let obj = pop!();
+                    if let Value::Object(o) = &obj {
+                        let target = o.class.find_method(&lc(&name)).map(|m| m.func);
+                        self.bind_ref_args(fr, site, target, &mut args);
+                    }
                     let r = self.call_method_named(&obj, &name, args)?;
                     fr.st.push(r);
                 }
-                Op::CallStatic(argc, forward) => {
-                    let args = split_args!(argc);
+                Op::CallStatic(argc, forward, site) => {
+                    let mut args = split_args!(argc);
                     let name = pop!().to_str();
                     let cv = pop!();
+                    if let Ok(c) = self.class_of(&cv) {
+                        let target = c.find_method(&lc(&name)).map(|m| m.func);
+                        self.bind_ref_args(fr, site, target, &mut args);
+                    }
                     let r = self.call_static_op(fr, &cv, &name, args, forward)?;
                     fr.st.push(r);
                 }
@@ -883,6 +1039,50 @@ impl<'p> Vm<'p> {
                     self.constants.insert(name.to_string(), v);
                 }
             }
+        }
+    }
+
+    /// Turn plain-variable arguments into shared reference cells where the callee takes them by reference.
+    fn bind_ref_args(&self, fr: &mut Frame, site: u32, func: Option<usize>, args: &mut [Value]) {
+        let Some(fi) = func else { return };
+        if site == u32::MAX {
+            return;
+        }
+        let f = &self.prog.funcs[fi];
+        if !f.ref_params.iter().any(|b| *b) {
+            return;
+        }
+        for (i, slot) in self.prog.sites[site as usize].iter().enumerate() {
+            if *slot == NO_SLOT || i >= args.len() {
+                continue;
+            }
+            let by_ref = f.ref_params.get(i).copied().unwrap_or(false) || (f.variadic && i + 1 >= f.nparams && f.ref_params.last().copied().unwrap_or(false));
+            if by_ref {
+                args[i] = Value::Ref(make_ref_cell(&mut fr.locals[*slot as usize]));
+            }
+        }
+    }
+
+    /// Elements of an array or Traversable, for `...$spread`.
+    fn spread_items(&mut self, src: &Value) -> R<Vec<(Key, Value)>> {
+        match src {
+            Value::Array(a) => Ok(a.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            Value::Object(_) => {
+                let mut it = src.clone();
+                while matches!(&it, Value::Object(o) if o.class.is_a("iteratoraggregate")) {
+                    it = self.call_method_named(&it, "getIterator", vec![])?;
+                }
+                let mut out = vec![];
+                self.call_method_named(&it, "rewind", vec![])?;
+                while self.call_method_named(&it, "valid", vec![])?.to_bool() {
+                    let v = self.call_method_named(&it, "current", vec![])?;
+                    let k = self.call_method_named(&it, "key", vec![])?;
+                    out.push((Key::from_value(&k)?, v));
+                    self.call_method_named(&it, "next", vec![])?;
+                }
+                Ok(out)
+            }
+            _ => self.throw_error("Error", "Only arrays and Traversables can be unpacked"),
         }
     }
 
@@ -1159,5 +1359,65 @@ fn incdec(v: &Value, inc: bool) -> Value {
             _ => v.clone(),
         },
         other => other.clone(),
+    }
+}
+
+fn unref(v: Value) -> Value {
+    match v {
+        Value::Ref(r) => r.borrow().deref(),
+        other => other,
+    }
+}
+
+fn get_local(locals: &[Value], s: u16) -> Value {
+    match &locals[s as usize] {
+        Value::Ref(r) => r.borrow().clone(),
+        v => v.clone(),
+    }
+}
+
+fn set_local(locals: &mut [Value], s: u16, v: Value) {
+    if let Value::Ref(r) = &locals[s as usize] {
+        *r.borrow_mut() = v;
+        return;
+    }
+    locals[s as usize] = v;
+}
+
+/// Run `f` on the variable's value in place (through a reference cell if there is one).
+fn with_local_mut<T>(locals: &mut [Value], s: u16, f: impl FnOnce(&mut Value) -> T) -> T {
+    if let Value::Ref(r) = &locals[s as usize] {
+        let cell = r.clone();
+        let mut cur = std::mem::replace(&mut *cell.borrow_mut(), Value::Null);
+        let out = f(&mut cur);
+        *cell.borrow_mut() = cur;
+        return out;
+    }
+    f(&mut locals[s as usize])
+}
+
+fn make_ref_cell(slot: &mut Value) -> Rc<RefCell<Value>> {
+    match slot {
+        Value::Ref(r) => r.clone(),
+        v => {
+            let cell = Rc::new(RefCell::new(std::mem::replace(v, Value::Null)));
+            *v = Value::Ref(cell.clone());
+            cell
+        }
+    }
+}
+
+/// foreach-by-reference: copy the loop variable's cell back into array element `p - 1`.
+fn write_back_elem(arr_cell: &Rc<RefCell<Value>>, var: &Value, p: usize) {
+    let Value::Ref(vc) = var else { return };
+    if p == 0 {
+        return;
+    }
+    let newv = vc.borrow().clone();
+    if let Value::Array(rc) = &mut *arr_cell.borrow_mut() {
+        let arr = Rc::make_mut(rc);
+        if let Some(k) = arr.key_at(p - 1) {
+            arr.set(k, newv);
+        }
     }
 }

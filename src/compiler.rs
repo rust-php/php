@@ -38,8 +38,18 @@ pub enum Op {
     UnsetDim(u16, u32),
     IncDec(u16, bool, bool), // slot, inc, prefix
     IterNext { arr: u16, pos: u16, key: u16, val: u16, exit: u32 },
-    Call(u32, u8),
-    CallValue(u8),
+    Call(u32, u8, u32),
+    CallRef(u32, u8),
+    CallValue(u8, u32),
+    CallSpread(u8, u32, bool),
+    ArrSpread,
+    MakeRef(u16),
+    BindRef(u16),
+    GlobalBind(u16, u32),
+    StaticBind(u16, u32, u32),
+    StaticInit(u16, u32),
+    IterNextRef { arr: u16, pos: u16, key: u16, val: u16, exit: u32 },
+    RefFlush { arr: u16, pos: u16, val: u16 },
     Ret,
     Exit,
     Fatal(u32),
@@ -49,12 +59,12 @@ pub enum Op {
     PushSelf,
     PushParent,
     PushStatic,
-    New(u8),
+    New(u8, u32),
     GetProp,
     AssignProp,
     AssignPropDim(u32),
-    CallMethod(u8),
-    CallStatic(u8, bool),
+    CallMethod(u8, u32),
+    CallStatic(u8, bool, u32),
     ClassConst,
     GetStatic,
     AssignStatic,
@@ -85,6 +95,8 @@ pub struct Func {
     pub code: Vec<Op>,
     pub handlers: Vec<Handler>,
     pub capture_slots: Vec<u16>,
+    pub ref_params: Vec<bool>,
+    pub variadic: bool,
 }
 
 #[derive(Debug)]
@@ -125,6 +137,11 @@ pub struct Program {
     pub func_index: HashMap<String, usize>,
     pub classes: Vec<ClassDef>,
     pub main: Func,
+    /// Argument-slot info for calls that pass plain variables (candidates for by-reference passing).
+    pub sites: Vec<Vec<u16>>,
+    pub main_locals: HashMap<String, u16>,
+    pub global_names: HashSet<String>,
+    pub static_count: u32,
 }
 
 struct LoopCtx {
@@ -157,7 +174,9 @@ pub fn compile(stmts: &[Stmt]) -> R<Program> {
     }
     fc.code.push(Op::Halt);
     let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
-    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![] };
+    let main_locals = fc.locals.clone();
+    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false };
+    prog.main_locals = main_locals;
     Ok(prog)
 }
 
@@ -179,12 +198,12 @@ fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
                 expr_vars(k, out);
             }
         }
-        Expr::Assign(a, b) | Expr::AssignOp(_, a, b) | Expr::Bin(_, a, b) => {
+        Expr::Assign(a, b) | Expr::AssignRef(a, b) | Expr::AssignOp(_, a, b) | Expr::Bin(_, a, b) => {
             expr_vars(a, out);
             expr_vars(b, out);
         }
         Expr::IncDec { target, .. } => expr_vars(target, out),
-        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) => expr_vars(a, out),
+        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) | Expr::Spread(a) => expr_vars(a, out),
         Expr::Ternary(a, b, c) => {
             expr_vars(a, out);
             if let Some(b) = b {
@@ -232,7 +251,7 @@ fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
                     }
                 }
             }
-            out.extend(c.uses.iter().cloned());
+            out.extend(c.uses.iter().map(|(n, _)| n.clone()));
         }
         Expr::Exit(Some(a)) => expr_vars(a, out),
         Expr::Match(s, arms, d) => {
@@ -270,6 +289,8 @@ impl Fc<'_> {
             Op::JmpNullKeep(_) => Op::JmpNullKeep(target),
             Op::IterNext { arr, pos, key, val, .. } => Op::IterNext { arr, pos, key, val, exit: target },
             Op::SkipIfArg(i, _) => Op::SkipIfArg(i, target),
+            Op::StaticBind(a, b, _) => Op::StaticBind(a, b, target),
+            Op::IterNextRef { arr, pos, key, val, .. } => Op::IterNextRef { arr, pos, key, val, exit: target },
             Op::JmpIfInstance(k, _) => Op::JmpIfInstance(k, target),
             op => op,
         };
@@ -385,23 +406,39 @@ impl Fc<'_> {
                 exits.into_iter().for_each(|e| self.patch(e, end));
                 self.finish_loop(cont, end);
             }
-            Stmt::Foreach { subject, key, val, body } => {
+            Stmt::Foreach { subject, key, val, by_ref, body } => {
                 let arr = self.hidden();
                 let pos = self.hidden();
-                self.expr(subject)?;
-                self.emit(Op::Store(arr));
-                self.emit(Op::Pop);
+                let ref_subject = match (by_ref, subject) {
+                    (true, Expr::Var(n)) => Some(self.slot(n)),
+                    _ => None,
+                };
+                if let Some(src) = ref_subject {
+                    self.emit(Op::MakeRef(src));
+                    self.emit(Op::BindRef(arr));
+                } else {
+                    self.expr(subject)?;
+                    self.emit(Op::Store(arr));
+                    self.emit(Op::Pop);
+                }
                 self.push_const(Value::Int(0));
                 self.emit(Op::Store(pos));
                 self.emit(Op::Pop);
                 let kslot = key.as_ref().map(|k| self.slot(k)).unwrap_or(NO_SLOT);
                 let vslot = self.slot(val);
-                let top = self.emit(Op::IterNext { arr, pos, key: kslot, val: vslot, exit: 0 });
+                let top = if ref_subject.is_some() {
+                    self.emit(Op::IterNextRef { arr, pos, key: kslot, val: vslot, exit: 0 })
+                } else {
+                    self.emit(Op::IterNext { arr, pos, key: kslot, val: vslot, exit: 0 })
+                };
                 self.new_loop(false);
                 self.block(body)?;
                 self.emit(Op::Jmp(top as u32));
                 let end = self.here();
                 self.patch(top, end);
+                if ref_subject.is_some() {
+                    self.emit(Op::RefFlush { arr, pos, val: vslot });
+                }
                 self.finish_loop(top as u32, end);
             }
             Stmt::Switch(subject, cases) => {
@@ -520,6 +557,29 @@ impl Fc<'_> {
                 self.expr(e)?;
                 let k = self.konst(Value::str(name));
                 self.emit(Op::DefConst(k));
+            }
+            Stmt::Global(names) => {
+                for n in names {
+                    let slot = self.slot(n);
+                    self.prog.global_names.insert(n.clone());
+                    let k = self.konst(Value::str(n));
+                    self.emit(Op::GlobalBind(slot, k));
+                }
+            }
+            Stmt::StaticVar(vars) => {
+                for (n, init) in vars {
+                    let slot = self.slot(n);
+                    let key = self.prog.static_count;
+                    self.prog.static_count += 1;
+                    let skip = self.emit(Op::StaticBind(slot, key, 0));
+                    match init {
+                        Some(e) => self.expr(e)?,
+                        None => self.push_const(Value::Null),
+                    }
+                    self.emit(Op::StaticInit(slot, key));
+                    let h = self.here();
+                    self.patch(skip, h);
+                }
             }
             Stmt::Try { body, catches, finally } => self.try_stmt(body, catches, finally.as_deref())?,
         }
@@ -651,7 +711,16 @@ impl Fc<'_> {
         sub.emit(Op::Ret);
         let (code, nlocals, handlers) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers));
         let idx = self.prog.funcs.len();
-        self.prog.funcs.push(Func { name: f.name.clone(), nparams: f.params.len(), nlocals, code, handlers, capture_slots });
+        self.prog.funcs.push(Func {
+            name: f.name.clone(),
+            nparams: f.params.len(),
+            nlocals,
+            code,
+            handlers,
+            capture_slots,
+            ref_params: f.params.iter().map(|p| p.by_ref).collect(),
+            variadic: f.params.last().is_some_and(|p| p.variadic),
+        });
         Ok(idx)
     }
 
@@ -732,6 +801,61 @@ impl Fc<'_> {
         })
     }
 
+    /// Record which call arguments are plain variables so by-reference parameters can bind to them.
+    fn site(&mut self, args: &[Expr]) -> u32 {
+        if !args.iter().any(|a| matches!(a, Expr::Var(_))) {
+            return u32::MAX;
+        }
+        let slots: Vec<u16> = args
+            .iter()
+            .map(|a| match a {
+                Expr::Var(n) => self.slot(n),
+                _ => NO_SLOT,
+            })
+            .collect();
+        self.prog.sites.push(slots);
+        (self.prog.sites.len() - 1) as u32
+    }
+
+    /// Push the arguments as one array (used when any argument is `...$spread`).
+    fn spread_args(&mut self, args: &[Expr]) -> R<()> {
+        self.emit(Op::NewArray);
+        for a in args {
+            match a {
+                Expr::Spread(inner) => {
+                    self.expr(inner)?;
+                    self.emit(Op::ArrSpread);
+                }
+                other => {
+                    self.expr(other)?;
+                    self.emit(Op::ArrPush);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Call a builtin that writes to some of its arguments (`sort`, `preg_match`, ...), then store the new values back.
+    fn call_ref_builtin(&mut self, k: u32, args: &[Expr], refs: &[usize]) -> R<()> {
+        let n = self.args(args)?;
+        self.emit(Op::CallRef(k, n));
+        let positions: Vec<usize> = refs.iter().copied().filter(|p| *p < args.len()).collect();
+        for p in positions.into_iter().rev() {
+            let target = &args[p];
+            if matches!(target, Expr::Var(_) | Expr::Index(..) | Expr::Prop { .. } | Expr::StaticProp(..)) {
+                let tmp = self.hidden();
+                self.emit(Op::Store(tmp));
+                self.emit(Op::Pop);
+                self.assign(target, |c| {
+                    c.emit(Op::Load(tmp));
+                    Ok(())
+                })?;
+            }
+            self.emit(Op::Pop);
+        }
+        Ok(())
+    }
+
     fn args(&mut self, args: &[Expr]) -> R<u8> {
         for a in args {
             self.expr(a)?;
@@ -751,13 +875,17 @@ impl Fc<'_> {
             Expr::Array(items) => {
                 self.emit(Op::NewArray);
                 for (k, v) in items {
-                    match k {
-                        Some(k) => {
+                    match (k, v) {
+                        (None, Expr::Spread(inner)) => {
+                            self.expr(inner)?;
+                            self.emit(Op::ArrSpread);
+                        }
+                        (Some(k), _) => {
                             self.expr(k)?;
                             self.expr(v)?;
                             self.emit(Op::ArrSet);
                         }
-                        None => {
+                        (None, _) => {
                             self.expr(v)?;
                             self.emit(Op::ArrPush);
                         }
@@ -847,15 +975,42 @@ impl Fc<'_> {
                 }
             }
             Expr::Call(name, args) => {
+                let lname = name.to_ascii_lowercase();
+                let k = self.konst(Value::str(&lname));
+                if has_spread(args) {
+                    self.spread_args(args)?;
+                    self.emit(Op::CallSpread(0, k, false));
+                    return Ok(());
+                }
+                let refs = builtins::ref_positions(&lname);
+                if !refs.is_empty() {
+                    return self.call_ref_builtin(k, args, refs);
+                }
                 let n = self.args(args)?;
-                let k = self.konst(Value::str(&name.to_ascii_lowercase()));
-                self.emit(Op::Call(k, n));
+                let site = self.site(args);
+                self.emit(Op::Call(k, n, site));
             }
             Expr::CallExpr(callee, args) => {
                 self.expr(callee)?;
+                if has_spread(args) {
+                    self.spread_args(args)?;
+                    self.emit(Op::CallSpread(1, 0, false));
+                    return Ok(());
+                }
                 let n = self.args(args)?;
-                self.emit(Op::CallValue(n));
+                let site = self.site(args);
+                self.emit(Op::CallValue(n, site));
             }
+            Expr::Spread(_) => return Err("Cannot use spread operator here".into()),
+            Expr::AssignRef(target, src) => match (&**target, &**src) {
+                (Expr::Var(a), Expr::Var(b)) => {
+                    let (sa, sb) = (self.slot(a), self.slot(b));
+                    self.emit(Op::MakeRef(sb));
+                    self.emit(Op::BindRef(sa));
+                    self.emit(Op::Load(sa));
+                }
+                _ => self.assign(target, |c| c.expr(src))?,
+            },
             Expr::Isset(items) => {
                 let mut jumps = vec![];
                 for (i, it) in items.iter().enumerate() {
@@ -900,8 +1055,14 @@ impl Fc<'_> {
             }
             Expr::New(c, args) => {
                 self.class_ref(c)?;
+                if has_spread(args) {
+                    self.spread_args(args)?;
+                    self.emit(Op::CallSpread(4, 0, false));
+                    return Ok(());
+                }
                 let n = self.args(args)?;
-                self.emit(Op::New(n));
+                let site = self.site(args);
+                self.emit(Op::New(n, site));
             }
             Expr::Prop { obj, name, nullsafe } => {
                 self.expr(obj)?;
@@ -917,8 +1078,14 @@ impl Fc<'_> {
                 self.expr(obj)?;
                 let j = nullsafe.then(|| self.emit(Op::JmpNullKeep(0)));
                 self.expr(name)?;
-                let n = self.args(args)?;
-                self.emit(Op::CallMethod(n));
+                if has_spread(args) {
+                    self.spread_args(args)?;
+                    self.emit(Op::CallSpread(2, 0, false));
+                } else {
+                    let n = self.args(args)?;
+                    let site = self.site(args);
+                    self.emit(Op::CallMethod(n, site));
+                }
                 if let Some(j) = j {
                     let h = self.here();
                     self.patch(j, h);
@@ -927,8 +1094,14 @@ impl Fc<'_> {
             Expr::StaticCall(c, name, args) => {
                 let forward = self.class_ref(c)?;
                 self.push_const(Value::str(name));
+                if has_spread(args) {
+                    self.spread_args(args)?;
+                    self.emit(Op::CallSpread(3, 0, forward));
+                    return Ok(());
+                }
                 let n = self.args(args)?;
-                self.emit(Op::CallStatic(n, forward));
+                let site = self.site(args);
+                self.emit(Op::CallStatic(n, forward, site));
             }
             Expr::StaticProp(c, name) => {
                 self.class_ref(c)?;
@@ -955,7 +1128,7 @@ impl Fc<'_> {
                 self.push_const(Value::Null);
             }
             Expr::Closure(c) => {
-                let uses: Vec<String> = if c.arrow {
+                let uses: Vec<(String, bool)> = if c.arrow {
                     let mut vars = HashSet::new();
                     for s in &c.func.body {
                         if let Stmt::Return(Some(e)) = s {
@@ -965,14 +1138,15 @@ impl Fc<'_> {
                     let params: HashSet<&str> = c.func.params.iter().map(|p| p.name.as_str()).collect();
                     let mut v: Vec<String> = vars.into_iter().filter(|n| n != "this" && !params.contains(n.as_str()) && self.locals.contains_key(n)).collect();
                     v.sort();
-                    v
+                    v.into_iter().map(|n| (n, false)).collect()
                 } else {
                     c.uses.clone()
                 };
-                let idx = self.compile_function(&c.func, &uses)?;
-                for u in &uses {
+                let names: Vec<String> = uses.iter().map(|(n, _)| n.clone()).collect();
+                let idx = self.compile_function(&c.func, &names)?;
+                for (u, by_ref) in &uses {
                     let s = self.slot(u);
-                    self.emit(Op::Load(s));
+                    self.emit(if *by_ref { Op::MakeRef(s) } else { Op::Load(s) });
                 }
                 self.emit(Op::MakeClosure(idx as u32, uses.len() as u8));
             }
@@ -1068,6 +1242,10 @@ impl Fc<'_> {
         }
         Ok(())
     }
+}
+
+fn has_spread(args: &[Expr]) -> bool {
+    args.iter().any(|a| matches!(a, Expr::Spread(_)))
 }
 
 enum Base<'a> {

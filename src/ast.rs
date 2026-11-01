@@ -40,6 +40,10 @@ pub enum Expr {
     Clone(Box<Expr>),
     Closure(Box<ClosureDecl>),
     Throw(Box<Expr>),
+    /// `$a = &$b`
+    AssignRef(Box<Expr>, Box<Expr>),
+    /// `...$args` inside a call or array literal
+    Spread(Box<Expr>),
     /// `match (subject) { a, b => x, default => y }`
     Match(Box<Expr>, Vec<(Vec<Expr>, Expr)>, Option<Box<Expr>>),
 }
@@ -50,6 +54,8 @@ pub struct Param {
     pub default: Option<Expr>,
     /// Constructor property promotion (`public function __construct(private $x)`).
     pub promote: bool,
+    pub by_ref: bool,
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +68,8 @@ pub struct FuncDecl {
 #[derive(Debug, Clone)]
 pub struct ClosureDecl {
     pub func: FuncDecl,
-    pub uses: Vec<String>,
+    /// (variable name, captured by reference)
+    pub uses: Vec<(String, bool)>,
     pub arrow: bool,
 }
 
@@ -119,7 +126,9 @@ pub enum Stmt {
     While(Expr, Vec<Stmt>),
     DoWhile(Vec<Stmt>, Expr),
     For(Vec<Expr>, Vec<Expr>, Vec<Expr>, Vec<Stmt>),
-    Foreach { subject: Expr, key: Option<String>, val: String, body: Vec<Stmt> },
+    Foreach { subject: Expr, key: Option<String>, val: String, by_ref: bool, body: Vec<Stmt> },
+    Global(Vec<String>),
+    StaticVar(Vec<(String, Option<Expr>)>),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Break(u32),
     Continue(u32),

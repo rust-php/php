@@ -5,6 +5,7 @@ pub mod lexer;
 pub mod object;
 pub mod parser;
 pub mod prelude;
+pub mod refbuiltins;
 pub mod value;
 pub mod vm;
 
@@ -134,6 +135,21 @@ mod tests {
         t("$m = 2; $g = fn($x) => $x + $m; echo $g(5), implode(',', array_map(fn($v) => $v * 2, [1, 2, 3]));", "71,2,3".replace("71,2,3", "72,4,6").as_str());
         t("echo match(2) { 1 => 'a', 2, 3 => 'b', default => 'c' };", "b");
         t("try { echo match(9) { 1 => 'a' }; } catch (\\UnhandledMatchError $e) { echo $e->getMessage(); }", "Unhandled match case 9");
+    }
+
+    #[test]
+    fn references() {
+        t("function inc(&$x) { $x++; } $a = 1; inc($a); inc($a); echo $a;", "3");
+        t("$a = [1,2,3]; foreach ($a as &$v) { $v *= 2; } unset($v); echo implode(',', $a);", "2,4,6");
+        t("$a = 1; $b = &$a; $b = 5; echo $a;", "5");
+        t("function f() { static $n = 0; return ++$n; } f(); f(); echo f();", "3");
+        t("$g = 10; function h() { global $g; $g++; } h(); echo $g;", "11");
+        t("$a = [3,1,2]; sort($a); echo implode(',', $a); usort($a, fn($x, $y) => $y <=> $x); echo implode(',', $a);", "1,2,33,2,1");
+        t("function s(...$xs) { return array_sum($xs); } echo s(1,2,3), s(...[4,5]);", "69");
+        t("$a = []; array_push($a, 1, 2); array_pop($a); echo count($a);", "1");
+        t("$c = 0; $f = function() use (&$c) { $c++; }; $f(); $f(); echo $c;", "2");
+        t("$a = ['x' => [3,1]]; sort($a['x']); echo implode(',', $a['x']);", "1,3");
+        t("class S { public $l = [2,1]; function go() { sort($this->l); return implode(',', $this->l); } } echo (new S)->go();", "1,2");
     }
 
     #[test]

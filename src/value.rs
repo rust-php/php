@@ -1,6 +1,6 @@
 //! Core value model: zval-equivalent `Value`, ordered-hash `PhpArray`, conversions and comparisons.
 use crate::object::Obj;
-use std::{cmp::Ordering, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -11,6 +11,7 @@ pub enum Key {
 impl Key {
     pub fn from_value(v: &Value) -> Result<Key, String> {
         Ok(match v {
+            Value::Ref(r) => return Key::from_value(&r.borrow()),
             Value::Int(i) => Key::Int(*i),
             Value::Str(s) => Key::from_str(s),
             Value::Bool(b) => Key::Int(*b as i64),
@@ -56,9 +57,20 @@ pub struct PhpArray {
     entries: Vec<Option<(Key, Value)>>,
     index: HashMap<Key, usize>,
     next: i64,
+    /// Internal array pointer (slot index), used by current()/next()/reset()/end().
+    pub ptr: usize,
 }
 
 impl PhpArray {
+    pub fn key_at(&self, slot: usize) -> Option<Key> {
+        self.entries.get(slot).and_then(|e| e.as_ref()).map(|(k, _)| k.clone())
+    }
+    pub fn slot_count(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn last_slot(&self) -> Option<usize> {
+        (0..self.entries.len()).rev().find(|i| self.entries[*i].is_some())
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -122,6 +134,8 @@ pub enum Value {
     Str(Rc<str>),
     Array(Rc<PhpArray>),
     Object(Rc<Obj>),
+    /// A PHP reference cell. Only ever stored in variable slots, never seen by PHP code.
+    Ref(Rc<RefCell<Value>>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -256,6 +270,13 @@ impl Value {
             Value::Str(_) => "string",
             Value::Array(_) => "array",
             Value::Object(_) => "object",
+            Value::Ref(_) => "reference",
+        }
+    }
+    pub fn deref(&self) -> Value {
+        match self {
+            Value::Ref(r) => r.borrow().deref(),
+            v => v.clone(),
         }
     }
     pub fn to_bool(&self) -> bool {
@@ -267,6 +288,7 @@ impl Value {
             Value::Str(s) => !(s.is_empty() || &**s == "0"),
             Value::Array(a) => !a.is_empty(),
             Value::Object(_) => true,
+            Value::Ref(r) => r.borrow().to_bool(),
         }
     }
     pub fn to_int(&self) -> i64 {
@@ -282,6 +304,7 @@ impl Value {
             },
             Value::Array(a) => !a.is_empty() as i64,
             Value::Object(_) => 1,
+            Value::Ref(r) => r.borrow().to_int(),
         }
     }
     pub fn to_float(&self) -> f64 {
@@ -301,6 +324,7 @@ impl Value {
             Value::Float(f) => fmt_float(*f, Some(14)).into(),
             Value::Array(_) => "Array".into(),
             Value::Object(_) => "Object".into(),
+            Value::Ref(r) => r.borrow().to_str(),
         }
     }
 }
@@ -329,6 +353,7 @@ fn num_of(v: &Value, op: &str, other: &Value, left: bool) -> Result<Num, String>
         Value::Float(f) => Ok(Num::F(*f)),
         Value::Str(s) => parse_numeric(s).map(|(n, _)| n).ok_or_else(bad),
         Value::Array(_) | Value::Object(_) => Err(bad()),
+        Value::Ref(r) => num_of(&r.borrow(), op, other, left),
     }
 }
 
@@ -433,6 +458,8 @@ fn as_num(v: &Value) -> Num {
 pub fn loose_cmp(a: &Value, b: &Value) -> Ordering {
     use Value::*;
     match (a, b) {
+        (Ref(r), _) => loose_cmp(&r.borrow(), b),
+        (_, Ref(r)) => loose_cmp(a, &r.borrow()),
         (Int(x), Int(y)) => x.cmp(y),
         (Int(_) | Float(_), Int(_) | Float(_)) => num_cmp(as_num(a), as_num(b)),
         (Str(x), Str(y)) => match (parse_numeric_whole(x), parse_numeric_whole(y)) {
@@ -484,6 +511,8 @@ pub fn loose_eq(a: &Value, b: &Value) -> bool {
 pub fn strict_eq(a: &Value, b: &Value) -> bool {
     use Value::*;
     match (a, b) {
+        (Ref(r), _) => strict_eq(&r.borrow(), b),
+        (_, Ref(r)) => strict_eq(a, &r.borrow()),
         (Null, Null) => true,
         (Bool(x), Bool(y)) => x == y,
         (Int(x), Int(y)) => x == y,
