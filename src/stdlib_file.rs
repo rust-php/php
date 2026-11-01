@@ -566,6 +566,40 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
             })
         }),
         ("closedir", |vm, a| vm_call(vm, "fclose", a)),
+        ("stream_get_line", |vm, a| {
+            let max = arg(&a, 1).to_int().max(0) as usize;
+            let delim = arg(&a, 2).to_str().to_string();
+            with_stream(vm, "stream_get_line", &a, |st, _| {
+                let mut out: Vec<u8> = Vec::new();
+                loop {
+                    if max > 0 && out.len() >= max {
+                        break;
+                    }
+                    let b = st.read(1);
+                    let Some(&c) = b.first() else { break };
+                    out.push(c);
+                    if !delim.is_empty() && out.ends_with(delim.as_bytes()) {
+                        out.truncate(out.len() - delim.len());
+                        break;
+                    }
+                }
+                if out.is_empty() { Value::Bool(false) } else { lossy(&out) }
+            })
+        }),
+        ("stream_copy_to_stream", |vm, a| {
+            let Some(dst) = res(&a, 1) else { return bad_resource(vm, "stream_copy_to_stream", &a) };
+            let data = with_stream(vm, "stream_copy_to_stream", &a, |st, _| st.read(usize::MAX / 2))?;
+            let taken = dst.stream.borrow_mut().take();
+            let n = match taken {
+                Some(mut st) => {
+                    let w = st.write(&data).unwrap_or(0);
+                    *dst.stream.borrow_mut() = Some(st);
+                    w
+                }
+                None => 0,
+            };
+            Ok(Value::Int(n as i64))
+        }),
     ];
     for (k, f) in list {
         m.insert(k, *f);
