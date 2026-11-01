@@ -171,6 +171,12 @@ impl Parser {
     }
 
     fn expr_stmt(&mut self) -> R<Stmt> {
+        if let (Tok::Ident(name), Tok::Op(":")) = (self.peek().clone(), self.peek_at(1).clone()) {
+            if !matches!(name.to_ascii_lowercase().as_str(), "default" | "case" | "else" | "parent" | "self" | "static") {
+                self.pos += 2;
+                return Ok(Stmt::Label(name));
+            }
+        }
         let e = self.expr(0)?;
         self.end_stmt()?;
         Ok(Stmt::Expr(e))
@@ -373,6 +379,12 @@ impl Parser {
                     self.end_stmt()?;
                     Ok(Stmt::Block(vec![]))
                 }
+            }
+            "goto" if matches!(self.peek_at(1), Tok::Ident(_)) => {
+                self.pos += 1;
+                let name = self.ident()?;
+                self.end_stmt()?;
+                Ok(Stmt::Goto(name))
             }
             "use" | "declare" | "goto" => {
                 // Imports and declare() have no effect on flattened namespaces.

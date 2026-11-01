@@ -158,6 +158,8 @@ pub enum Stmt {
     For(Vec<Expr>, Vec<Expr>, Vec<Expr>, Vec<Stmt>),
     Foreach { subject: Expr, key: Option<String>, val: String, pattern: Option<Expr>, by_ref: bool, body: Vec<Stmt> },
     Global(Vec<String>),
+    Label(String),
+    Goto(String),
     StaticVar(Vec<(String, Option<Expr>)>),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Break(u32),

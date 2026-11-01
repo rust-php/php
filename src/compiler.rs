@@ -183,10 +183,12 @@ struct Fc<'a> {
     handlers: Vec<Handler>,
     has_yield: bool,
     ret_ty: Option<u32>,
+    labels: HashMap<String, u32>,
+    gotos: Vec<(usize, String)>,
 }
 
 fn new_fc(prog: &mut Program) -> Fc<'_> {
-    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![], has_yield: false, ret_ty: None };
+    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![], has_yield: false, ret_ty: None, labels: HashMap::new(), gotos: vec![] };
     fc.slot("this");
     fc
 }
@@ -198,6 +200,7 @@ fn build_main(prog: &mut Program, stmts: &[Stmt]) -> R<(Func, HashMap<String, u1
         fc.stmt(s)?;
     }
     fc.code.push(Op::Halt);
+    fc.resolve_gotos()?;
     let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
     let locals = fc.locals.clone();
     let names = names_by_slot(&locals);
@@ -356,6 +359,17 @@ impl Fc<'_> {
         self.slot(&name)
     }
 
+    /// Resolve `goto` jumps recorded in this function body.
+    fn resolve_gotos(&mut self) -> R<()> {
+        for (at, name) in std::mem::take(&mut self.gotos) {
+            match self.labels.get(&name) {
+                Some(&t) => self.patch(at, t),
+                None => return Err(format!("'goto' to undefined label '{name}'")),
+            }
+        }
+        Ok(())
+    }
+
     fn block(&mut self, stmts: &[Stmt]) -> R<()> {
         stmts.iter().try_for_each(|s| self.stmt(s))
     }
@@ -381,6 +395,14 @@ impl Fc<'_> {
                 self.emit(Op::Pop);
             }
             Stmt::Block(b) => self.block(b)?,
+            Stmt::Label(name) => {
+                let h = self.here();
+                self.labels.insert(name.clone(), h);
+            }
+            Stmt::Goto(name) => {
+                let at = self.emit(Op::Jmp(0));
+                self.gotos.push((at, name.clone()));
+            }
             Stmt::If(arms, els) => {
                 let mut ends = vec![];
                 for (cond, body) in arms {
@@ -779,6 +801,7 @@ impl Fc<'_> {
             }
         }
         sub.block(&f.body)?;
+        sub.resolve_gotos()?;
         if let (true, Some(ti)) = (ret_none_needs_error, ret_idx) {
             sub.emit(Op::RetNone(ti));
         }
