@@ -129,6 +129,86 @@ pub fn register(m: &mut HashMap<&'static str, Builtin>) {
     }
 }
 
+/// url.c php_default_treat_data for one `name=value` pair, including `a[b][]` bracket syntax.
+fn treat_pair(out: &mut PhpArray, name: &str, value: &str) {
+    let name = name.replace('.', "_").replace(' ', "_");
+    let (base, rest) = match name.find('[') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name.as_str(), ""),
+    };
+    if base.is_empty() {
+        return;
+    }
+    let mut keys: Vec<Option<String>> = vec![];
+    let mut r = rest;
+    while let Some(stripped) = r.strip_prefix('[') {
+        let Some(end) = stripped.find(']') else { break };
+        let k = &stripped[..end];
+        keys.push(if k.is_empty() { None } else { Some(k.to_string()) });
+        r = &stripped[end + 1..];
+    }
+    if keys.is_empty() {
+        out.set(Key::from_str(base), Value::str(value));
+        return;
+    }
+    fn insert(cur: &mut PhpArray, keys: &[Option<String>], value: Value) {
+        match keys.split_first() {
+            None => {}
+            Some((k, rest)) => {
+                let key = match k {
+                    Some(k) => Key::from_str(k),
+                    None => Key::Int(cur.len() as i64),
+                };
+                if rest.is_empty() {
+                    match k {
+                        Some(_) => cur.set(key, value),
+                        None => cur.push(value),
+                    }
+                    return;
+                }
+                let mut child = match cur.get(&key) {
+                    Some(Value::Array(a)) => (**a).clone(),
+                    _ => PhpArray::new(),
+                };
+                insert(&mut child, rest, value);
+                cur.set(key, Value::Array(Rc::new(child)));
+            }
+        }
+    }
+    let mut top = match out.get(&Key::from_str(base)) {
+        Some(Value::Array(a)) => (**a).clone(),
+        _ => PhpArray::new(),
+    };
+    insert(&mut top, &keys, Value::str(value));
+    out.set(Key::from_str(base), Value::Array(Rc::new(top)));
+}
+
+pub fn treat_pair_pub(out: &mut PhpArray, name: &str, value: &str) {
+    treat_pair(out, name, value)
+}
+
+pub fn url_decode_pub(t: &str) -> String {
+    url_decode(t)
+}
+
+fn url_decode(t: &str) -> String {
+    let b = t.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() + 0 && b.get(i + 1).is_some_and(u8::is_ascii_hexdigit) && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit) => {
+                out.push(u8::from_str_radix(&t[i + 1..i + 3], 16).unwrap_or(b'%'));
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     let list: &[(&str, VmBuiltin)] = &[
         ("putenv", |_, a| {

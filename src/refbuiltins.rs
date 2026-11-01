@@ -12,6 +12,7 @@ pub fn ref_positions(name: &str) -> &'static [usize] {
         | "array_shift" | "array_unshift" | "array_splice" | "reset" | "end" | "next" | "prev" | "array_walk" | "natsort" | "natcasesort" | "array_walk_recursive" => &[0],
         "array_multisort" => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         "preg_match" | "preg_match_all" => &[2],
+        "parse_str" => &[1],
         "preg_replace" | "preg_replace_callback" => &[4],
         "str_replace" | "str_ireplace" => &[3],
         "settype" => &[0],
@@ -74,6 +75,19 @@ fn type_err<T>(vm: &mut Vm<'_>, f: &str, v: &Value) -> R<T> {
 }
 
 pub fn call_ref(vm: &mut Vm<'_>, name: &str, args: &mut Vec<Value>) -> Option<R<Value>> {
+    if name == "parse_str" {
+        let text = args.first().map(|v| v.to_str()).unwrap_or_else(|| "".into());
+        let mut out = PhpArray::new();
+        for pair in text.split('&').filter(|p| !p.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            crate::port_misc::treat_pair_pub(&mut out, &crate::port_misc::url_decode_pub(k), &crate::port_misc::url_decode_pub(v));
+        }
+        while args.len() < 2 {
+            args.push(Value::Null);
+        }
+        args[1] = Value::Array(Rc::new(out));
+        return Some(Ok(Value::Null));
+    }
     if matches!(name, "preg_match" | "preg_match_all" | "preg_replace" | "preg_replace_callback") {
         return crate::stdlib_preg::call(vm, name, args);
     }
