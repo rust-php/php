@@ -12,7 +12,7 @@ pub fn ve<T>(vm: &mut Vm<'_>, f: &str, n: usize, p: &str, msg: &str) -> R<T> {
 }
 
 fn must_not_empty<T>(vm: &mut Vm<'_>, f: &str, n: usize, p: &str) -> R<T> {
-    ve(vm, f, n, p, "cannot be empty")
+    ve(vm, f, n, p, "must not be empty")
 }
 
 // ---- bin2hex / hex2bin ----
@@ -250,7 +250,7 @@ fn explode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     let s = p_str(vm, "explode", &a, 1, "string")?;
     let limit = p_int_opt(vm, "explode", &a, 2, "limit", i64::MAX)?;
     if delim.is_empty() {
-        return ve(vm, "explode", 1, "separator", "cannot be empty");
+        return ve(vm, "explode", 1, "separator", "must not be empty, use str_split() to split a string into characters");
     }
     if s.is_empty() {
         return Ok(if limit >= 0 { list(vec![vstr("")]) } else { list(vec![]) });
@@ -415,7 +415,7 @@ fn str_increment(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "str_increment", &a, 1, 1)?;
     let s = p_str(vm, "str_increment", &a, 0, "string")?;
     if s.is_empty() {
-        return ve(vm, "str_increment", 1, "string", "cannot be empty");
+        return ve(vm, "str_increment", 1, "string", "must not be empty");
     }
     if !s.bytes().all(|c| c.is_ascii_alphanumeric()) {
         return ve(vm, "str_increment", 1, "string", "must be composed only of alphanumeric ASCII characters");
@@ -460,7 +460,7 @@ fn str_decrement(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "str_decrement", &a, 1, 1)?;
     let s = p_str(vm, "str_decrement", &a, 0, "string")?;
     if s.is_empty() {
-        return ve(vm, "str_decrement", 1, "string", "cannot be empty");
+        return ve(vm, "str_decrement", 1, "string", "must not be empty");
     }
     if !s.bytes().all(|c| c.is_ascii_alphanumeric()) {
         return ve(vm, "str_decrement", 1, "string", "must be composed only of alphanumeric ASCII characters");
@@ -659,7 +659,7 @@ fn substr(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     let n = s.len() as i64;
     let mut len = l.unwrap_or(n);
     if f < 0 {
-        if -f > n {
+        if f.checked_neg().is_none_or(|x| x > n) {
             f = 0;
         } else {
             f += n;
@@ -686,7 +686,7 @@ fn substr_count(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     let mut off = p_int_opt(vm, "substr_count", &a, 2, "offset", 0)?;
     let len = p_int_null(vm, "substr_count", &a, 3, "length")?;
     if n.is_empty() {
-        return ve(vm, "substr_count", 2, "needle", "cannot be empty");
+        return ve(vm, "substr_count", 2, "needle", "must not be empty");
     }
     let hl = h.len() as i64;
     if off < 0 {

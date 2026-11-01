@@ -143,7 +143,7 @@ fn substr_replace(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
         if l > n {
             l = n;
         }
-        if f + l > n {
+        if f.saturating_add(l) > n {
             l = n - f;
         }
         let rs: String = match &repl_arr {
@@ -187,7 +187,7 @@ fn substr_replace(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
         if l < 0 {
             l = ((n - f) + l).max(0);
         }
-        if f + l > n {
+        if f.saturating_add(l) > n {
             l = n - f;
         }
         let rs: String = match &mut repl_it {

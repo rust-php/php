@@ -80,7 +80,7 @@ pub fn p_int(vm: &mut Vm<'_>, f: &str, a: &[Value], i: usize, p: &str) -> R<i64>
         Value::Int(n) => Ok(*n),
         Value::Bool(b) => Ok(*b as i64),
         Value::Float(x) => {
-            if x.is_nan() || x.is_infinite() {
+            if x.is_nan() || x.is_infinite() || *x >= 9.2233720368547758e18 || *x < -9.2233720368547758e18 {
                 return terr(vm, f, i, p, "int", &v);
             }
             if x.fract() != 0.0 {
