@@ -414,6 +414,15 @@ pub fn formatted_print(vm: &mut Vm<'_>, format: &str, args: &[Value], nb_additio
             return verr(vm, "Precision -1 is only supported for %g, %G, %h and %H");
         }
         let tmp = args[argnum as usize].deref();
+        let obj_conv = |vm: &mut Vm<'_>, to: &str| {
+            if let Value::Object(o) = &tmp {
+                let msg = format!("Object of class {} could not be converted to {to}", o.class.name);
+                warn(vm, &msg);
+                true
+            } else {
+                false
+            }
+        };
         let (w, pr) = (width as usize, precision as usize);
         let mut sp = Spec { out: &mut out };
         match spec {
@@ -424,16 +433,17 @@ pub fn formatted_print(vm: &mut Vm<'_>, format: &str, args: &[Value], nb_additio
                 let s = vm.to_string_val(&tmp)?;
                 sp.append_string(s.as_bytes(), w, pr, padding, alignment, false, expprec, false);
             }
-            b'd' => sp.append_int(tmp.to_int(), w, padding, alignment, always_sign),
-            b'u' => sp.append_uint(tmp.to_int() as u64, w, padding, alignment),
+            b'd' => sp.append_int(if obj_conv(vm, "int") { 1 } else { tmp.to_int() }, w, padding, alignment, always_sign),
+            b'u' => sp.append_uint(if obj_conv(vm, "int") { 1 } else { tmp.to_int() } as u64, w, padding, alignment),
             b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'h' | b'H' => {
-                sp.append_double(vm, tmp.to_float(), w, padding, alignment, precision as i32, adjusting, spec as char, always_sign)
+                let dv = if obj_conv(vm, "float") { 1.0 } else { tmp.to_float() };
+                sp.append_double(vm, dv, w, padding, alignment, precision as i32, adjusting, spec as char, always_sign)
             }
-            b'c' => sp.out.push(tmp.to_int() as u8),
-            b'o' => sp.append_2n(tmp.to_int(), w, padding, alignment, 3, HEX, expprec),
-            b'x' => sp.append_2n(tmp.to_int(), w, padding, alignment, 4, HEX, expprec),
-            b'X' => sp.append_2n(tmp.to_int(), w, padding, alignment, 4, HEXU, expprec),
-            b'b' => sp.append_2n(tmp.to_int(), w, padding, alignment, 1, HEX, expprec),
+            b'c' => sp.out.push(if obj_conv(vm, "int") { 1 } else { tmp.to_int() } as u8),
+            b'o' => sp.append_2n(if obj_conv(vm, "int") { 1 } else { tmp.to_int() }, w, padding, alignment, 3, HEX, expprec),
+            b'x' => sp.append_2n(if obj_conv(vm, "int") { 1 } else { tmp.to_int() }, w, padding, alignment, 4, HEX, expprec),
+            b'X' => sp.append_2n(if obj_conv(vm, "int") { 1 } else { tmp.to_int() }, w, padding, alignment, 4, HEXU, expprec),
+            b'b' => sp.append_2n(if obj_conv(vm, "int") { 1 } else { tmp.to_int() }, w, padding, alignment, 1, HEX, expprec),
             b'%' => sp.out.push(b'%'),
             0 if pos >= f.len() => return verr(vm, "Missing format specifier at end of string"),
             c => return verr(vm, &format!("Unknown format specifier \"{}\"", c as char)),

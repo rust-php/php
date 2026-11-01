@@ -269,7 +269,9 @@ fn mb_str_split(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
 }
 
 fn is_cased(c: char) -> bool {
-    c.is_lowercase() || c.is_uppercase() || matches!(c, '\u{1C5}' | '\u{1C8}' | '\u{1CB}' | '\u{1F2}')
+    c.is_lowercase()
+        || c.is_uppercase()
+        || matches!(c, '\u{1C5}' | '\u{1C8}' | '\u{1CB}' | '\u{1F2}' | '\u{1F88}'..='\u{1F8F}' | '\u{1F98}'..='\u{1F9F}' | '\u{1FA8}'..='\u{1FAF}' | '\u{1FBC}' | '\u{1FCC}' | '\u{1FFC}')
 }
 fn is_case_ignorable(c: char) -> bool {
     matches!(c, '\'' | '.' | ':' | '^' | '`' | '\u{a8}' | '\u{ad}' | '\u{af}' | '\u{b4}' | '\u{b7}' | '\u{b8}' | '\u{2018}' | '\u{2019}' | '\u{2024}' | '\u{2027}' | '\u{fe13}' | '\u{fe52}' | '\u{fe55}' | '\u{ff07}' | '\u{ff0e}' | '\u{ff1a}')
@@ -284,6 +286,20 @@ fn title_char(c: char) -> String {
         '\u{1CA}' | '\u{1CB}' | '\u{1CC}' => "\u{1CB}".into(),
         '\u{1F1}' | '\u{1F2}' | '\u{1F3}' => "\u{1F2}".into(),
         'ß' => "Ss".into(),
+        '\u{FB00}' => "Ff".into(),
+        '\u{FB01}' => "Fi".into(),
+        '\u{FB02}' => "Fl".into(),
+        '\u{FB03}' => "Ffi".into(),
+        '\u{FB04}' => "Ffl".into(),
+        '\u{FB05}' | '\u{FB06}' => "St".into(),
+        '\u{149}' => "\u{2BC}N".into(),
+        '\u{1F0}' => "J\u{30C}".into(),
+        '\u{587}' => "\u{535}\u{582}".into(),
+        '\u{1F80}'..='\u{1F87}' | '\u{1F90}'..='\u{1F97}' | '\u{1FA0}'..='\u{1FA7}' => char::from_u32(c as u32 + 8).map(|x| x.to_string()).unwrap_or_default(),
+        '\u{1FB3}' => "\u{1FBC}".into(),
+        '\u{1FC3}' => "\u{1FCC}".into(),
+        '\u{1FF3}' => "\u{1FFC}".into(),
+        '\u{10D0}'..='\u{10FA}' | '\u{10FD}'..='\u{10FF}' => c.to_string(),
         _ => c.to_uppercase().collect(),
     }
 }
@@ -308,13 +324,17 @@ fn convert_case(s: &str, mode: i64) -> String {
             // title (2) and simple title (6)
             let mut out = String::new();
             let mut in_word = false;
-            for c in s.chars() {
+            let chars: Vec<char> = s.chars().collect();
+            for (i, &c) in chars.iter().enumerate() {
                 if in_word {
                     if is_case_ignorable(c) {
                         out.push(c);
                     } else if is_cased(c) {
                         if mode == 6 {
                             out.push(fold1(c))
+                        } else if c == '\u{3A3}' {
+                            let next_cased = chars.get(i + 1).is_some_and(|n| is_cased(*n) || is_case_ignorable(*n) && chars.get(i + 2).is_some_and(|m| is_cased(*m)));
+                            out.push(if next_cased { '\u{3C3}' } else { '\u{3C2}' })
                         } else {
                             out.extend(c.to_lowercase())
                         }
