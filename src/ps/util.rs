@@ -20,15 +20,16 @@ pub fn deprecated(vm: &mut Vm<'_>, msg: &str) {
     diag(vm, "Deprecated", msg)
 }
 
-pub fn zname(v: &Value) -> &'static str {
+pub fn zname(v: &Value) -> String {
     match v {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Int(_) => "int",
-        Value::Float(_) => "float",
-        Value::Str(_) => "string",
-        Value::Array(_) => "array",
-        _ => v.type_name(),
+        Value::Null => "null".into(),
+        Value::Bool(_) => "bool".into(),
+        Value::Int(_) => "int".into(),
+        Value::Float(_) => "float".into(),
+        Value::Str(_) => "string".into(),
+        Value::Array(_) => "array".into(),
+        Value::Object(o) => o.class.name.to_string(),
+        _ => v.type_name().to_string(),
     }
 }
 

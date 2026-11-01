@@ -222,13 +222,23 @@ fn quotemeta(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
 fn ord(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "ord", &a, 1, 1)?;
     let s = p_str(vm, "ord", &a, 0, "character")?;
+    if s.len() != 1 {
+        if s.is_empty() {
+            deprecated(vm, "ord(): Providing an empty string is deprecated");
+        } else {
+            deprecated(vm, "ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead");
+        }
+    }
     Ok(Value::Int(s.as_bytes().first().copied().unwrap_or(0) as i64))
 }
 
 fn chr(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "chr", &a, 1, 1)?;
     let c = p_int(vm, "chr", &a, 0, "codepoint")?;
-    let b = (c.rem_euclid(256)) as u8;
+    if !(0..=255).contains(&c) {
+        deprecated(vm, "chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256");
+    }
+    let b = (c & 0xff) as u8;
     // The engine has no binary strings: bytes >= 0x80 map to the Latin-1 code point.
     Ok(if b < 0x80 { from_bytes(&[b]) } else { vstr(&(b as char).to_string()) })
 }
@@ -654,14 +664,14 @@ fn strcmp_family(vm: &mut Vm<'_>, f: &str, a: Vec<Value>, n: bool, ci: bool) -> 
 // ---- utf8_encode / decode ----
 fn utf8_encode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "utf8_encode", &a, 1, 1)?;
-    deprecated(vm, "Function utf8_encode() is deprecated since 8.2, visit the php.watch/versions/8.2/utf8_encode-utf8_decode-deprecated page for more details");
+    deprecated(vm, "Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives");
     let s = p_str(vm, "utf8_encode", &a, 0, "string")?;
     // The input is a byte string; bytes are treated as Latin-1 code points.
     Ok(vstr(&s.bytes().map(|b| b as char).collect::<String>()))
 }
 fn utf8_decode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "utf8_decode", &a, 1, 1)?;
-    deprecated(vm, "Function utf8_decode() is deprecated since 8.2, visit the php.watch/versions/8.2/utf8_encode-utf8_decode-deprecated page for more details");
+    deprecated(vm, "Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives");
     let s = p_str(vm, "utf8_decode", &a, 0, "string")?;
     let b: String = s.chars().map(|c| if (c as u32) < 256 { (c as u32 as u8) as char } else { '?' }).collect();
     Ok(vstr(&b))
