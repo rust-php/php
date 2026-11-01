@@ -60,6 +60,7 @@ interface JsonSerializable {}
 interface UnitEnum {}
 interface Throwable extends Stringable {}
 class stdClass {}
+class __PHP_Incomplete_Class {}
 final class Closure {}
 final class Generator implements Iterator {}
 final class Fiber {}

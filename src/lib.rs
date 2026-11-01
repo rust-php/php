@@ -7,6 +7,9 @@ pub mod object;
 pub mod parser;
 pub mod prelude;
 pub mod refbuiltins;
+pub mod stdlib_arr;
+pub mod stdlib_data;
+pub mod stdlib_str;
 pub mod value;
 pub mod vm;
 
@@ -194,6 +197,18 @@ mod tests {
         t("$f = new Fiber(function($x) { $y = Fiber::suspend($x * 2); echo 'got ', $y, ';'; return 'done'; }); echo $f->start(5), ';'; $f->resume('r'); echo $f->getReturn(), $f->isTerminated() ? 'T' : 'F';", "10;got r;doneT");
         t("function deep($n) { if ($n == 0) { return Fiber::suspend('bottom'); } return deep($n - 1); } $f = new Fiber(fn() => deep(5)); echo $f->start(); $f->resume(1); echo $f->isTerminated() ? 'T' : 'F';", "bottomT");
         t("$f = new Fiber(function() { try { Fiber::suspend(1); } catch (Exception $e) { echo 'caught ', $e->getMessage(); } }); $f->start(); $f->throw(new Exception('x'));", "caught x");
+    }
+
+    #[test]
+    fn stdlib() {
+        t("echo json_encode(['a' => 1, 'b' => [1, 2], 'c' => null, 'd' => 1.5, 'e' => 'x/y']);", "{\"a\":1,\"b\":[1,2],\"c\":null,\"d\":1.5,\"e\":\"x\\/y\"}");
+        t("var_dump(json_decode('{\"a\":[1,{\"b\":2}]}', true)['a'][1]['b']);", "int(2)\n");
+        t("echo json_decode('{\"x\":5}')->x, json_last_error();", "50");
+        t("echo serialize(['a' => 1, 2 => 'z']);", "a:2:{s:1:\"a\";i:1;i:2;s:1:\"z\";}");
+        t("class P { public $a = 1; protected $b = [2]; } $s = serialize(new P); $o = unserialize($s); echo get_class($o), count($o->b ?? []);", "P1");
+        t("echo md5('a'), ' ', crc32('hello'), ' ', base64_encode('hello'), ' ', strtoupper(bin2hex('ab'));", "0cc175b9c0f1b6a831c399e269772661 907060870 aGVsbG8= 6162");
+        t("echo date('Y-m-d H:i:s', 86400 * 365), ' ', ucwords('hello big world'), ' ', str_pad('5', 3, '0', STR_PAD_LEFT);", "1971-01-01 00:00:00 Hello Big World 005");
+        t("echo implode(',', array_diff([1, 2, 3, 4], [2, 4])), '|', implode(',', array_column([['id' => 1], ['id' => 2]], 'id')), '|', levenshtein('kitten', 'sitting');", "1,3|1,2|3");
     }
 
     #[test]

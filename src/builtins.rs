@@ -6,22 +6,22 @@ use std::{collections::HashMap, rc::Rc, sync::OnceLock};
 
 pub use crate::refbuiltins::{call_ref, ref_positions};
 
-type Res = Result<Value, String>;
-type Builtin = fn(&mut Vm<'_>, Vec<Value>) -> Res;
+pub(crate) type Res = Result<Value, String>;
+pub(crate) type Builtin = fn(&mut Vm<'_>, Vec<Value>) -> Res;
 
-fn arg(a: &[Value], i: usize) -> Value {
+pub(crate) fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).cloned().unwrap_or(Value::Null)
 }
 
-fn s(v: &str) -> Value {
+pub(crate) fn s(v: &str) -> Value {
     Value::Str(v.into())
 }
 
-fn arr(items: Vec<Value>) -> Value {
+pub(crate) fn arr(items: Vec<Value>) -> Value {
     Value::Array(Rc::new(PhpArray::from_list(items)))
 }
 
-fn need_arr(a: &[Value], i: usize, f: &str) -> Result<Rc<PhpArray>, String> {
+pub(crate) fn need_arr(a: &[Value], i: usize, f: &str) -> Result<Rc<PhpArray>, String> {
     match a.get(i) {
         Some(Value::Array(x)) => Ok(x.clone()),
         other => Err(format!(
@@ -68,6 +68,9 @@ pub fn constant(name: &str) -> Option<Value> {
 fn table() -> &'static HashMap<&'static str, Builtin> {
     static T: OnceLock<HashMap<&'static str, Builtin>> = OnceLock::new();
     T.get_or_init(|| {
+        let mut map_all: HashMap<&'static str, Builtin> = HashMap::new();
+        crate::stdlib_str::register(&mut map_all);
+        crate::stdlib_arr::register(&mut map_all);
         let list: &[(&str, Builtin)] = &[
             ("strlen", |_, a| Ok(Value::Int(arg(&a, 0).to_str().len() as i64))),
             ("count", |_, a| match a.first() {
@@ -454,7 +457,10 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
             ("ini_set", |_, _| Ok(Value::Bool(false))),
             ("set_error_handler", |_, _| Ok(Value::Null)),
         ];
-        list.iter().copied().collect()
+        for (k, f) in list {
+            map_all.insert(k, *f);
+        }
+        map_all
     })
 }
 
@@ -545,7 +551,7 @@ pub fn php_round(x: f64, places: i32) -> f64 {
     if places >= 0 { r / f } else { r * f }
 }
 
-fn sprintf(a: &[Value]) -> Result<String, String> {
+pub(crate) fn sprintf(a: &[Value]) -> Result<String, String> {
     let fmt: Vec<char> = arg(a, 0).to_str().chars().collect();
     let mut out = String::new();
     let (mut i, mut next_arg) = (0, 1);
@@ -803,7 +809,7 @@ fn var_export(v: &Value, ind: usize, out: &mut String) {
     }
 }
 
-type VmBuiltin = fn(&mut Vm<'_>, Vec<Value>) -> Result<Value, Flow>;
+pub(crate) type VmBuiltin = fn(&mut Vm<'_>, Vec<Value>) -> Result<Value, Flow>;
 
 fn bool_v(b: bool) -> Result<Value, Flow> {
     Ok(Value::Bool(b))
@@ -816,6 +822,8 @@ fn class_name_arg(vm: &Vm<'_>, v: &Value) -> Option<std::rc::Rc<crate::object::C
 fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
     static T: OnceLock<HashMap<&'static str, VmBuiltin>> = OnceLock::new();
     T.get_or_init(|| {
+        let mut all: HashMap<&'static str, VmBuiltin> = HashMap::new();
+        crate::stdlib_data::register(&mut all);
         let list: &[(&str, VmBuiltin)] = &[
             ("count", |vm, a| match a.first() {
                 Some(Value::Array(x)) => Ok(Value::Int(x.len() as i64)),
@@ -1088,6 +1096,9 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
                 }
             }),
         ];
-        list.iter().copied().collect()
+        for (k, f) in list {
+            all.insert(k, *f);
+        }
+        all
     })
 }

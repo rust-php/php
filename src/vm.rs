@@ -73,6 +73,7 @@ pub struct Vm<'p> {
     pub error_handler: Option<Value>,
     pub shutdown: Vec<(Value, Vec<Value>)>,
     pub fiber_stack: Vec<Value>,
+    pub json_error: (i64, &'static str),
     statics: HashMap<u32, Rc<RefCell<Value>>>,
     depth: usize,
 }
@@ -85,7 +86,7 @@ fn lc(s: &str) -> String {
 
 impl<'p> Vm<'p> {
     pub fn new(prog: &'p Program) -> Self {
-        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), statics: HashMap::new(), depth: 0 }
+        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), json_error: (0, "No error"), statics: HashMap::new(), depth: 0 }
     }
 
     pub fn run_main(&mut self) -> R<()> {
