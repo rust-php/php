@@ -44,6 +44,12 @@ pub enum Expr {
     AssignRef(Box<Expr>, Box<Expr>),
     /// `...$args` inside a call or array literal
     Spread(Box<Expr>),
+    /// Skipped slot in `[, $b] = ...`
+    Hole,
+    /// Destructuring pattern: `list($a, 'k' => $b)` / `[$a, [$b]]` as an assignment target.
+    List(Vec<Option<(Option<Expr>, Expr)>>),
+    Yield(Option<Box<Expr>>, Option<Box<Expr>>),
+    YieldFrom(Box<Expr>),
     /// `match (subject) { a, b => x, default => y }`
     Match(Box<Expr>, Vec<(Vec<Expr>, Expr)>, Option<Box<Expr>>),
 }
@@ -78,6 +84,7 @@ pub enum ClassKind {
     Class,
     Interface,
     Trait,
+    Enum,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +115,9 @@ pub struct ClassDecl {
     pub consts: Vec<(String, Expr)>,
     pub props: Vec<PropDecl>,
     pub methods: Vec<MethodDecl>,
+    /// Enum cases with optional backing value expressions.
+    pub cases: Vec<(String, Option<Expr>)>,
+    pub backed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -126,7 +136,7 @@ pub enum Stmt {
     While(Expr, Vec<Stmt>),
     DoWhile(Vec<Stmt>, Expr),
     For(Vec<Expr>, Vec<Expr>, Vec<Expr>, Vec<Stmt>),
-    Foreach { subject: Expr, key: Option<String>, val: String, by_ref: bool, body: Vec<Stmt> },
+    Foreach { subject: Expr, key: Option<String>, val: String, pattern: Option<Expr>, by_ref: bool, body: Vec<Stmt> },
     Global(Vec<String>),
     StaticVar(Vec<(String, Option<Expr>)>),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),

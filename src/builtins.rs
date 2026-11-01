@@ -672,6 +672,10 @@ fn var_dump(v: &Value, ind: usize, out: &mut String) {
         Value::Int(i) => out.push_str(&format!("{pad}int({i})\n")),
         Value::Float(f) => out.push_str(&format!("{pad}float({})\n", fmt_float(*f, None))),
         Value::Str(t) => out.push_str(&format!("{pad}string({}) \"{t}\"\n", t.len())),
+        Value::Object(o) if o.class.kind == crate::ast::ClassKind::Enum => {
+            let case = o.props.borrow().get(&Key::from_str("name")).map(|n| n.to_str().to_string()).unwrap_or_default();
+            out.push_str(&format!("{pad}enum({}::{case})\n", o.class.name));
+        }
         Value::Object(o) => {
             let props = o.props.borrow();
             out.push_str(&format!("{pad}object({})#{} ({}) {{\n", o.class.name, o.id, props.len()));
@@ -707,7 +711,16 @@ fn print_r(v: &Value, ind: usize, out: &mut String) {
     match v {
         Value::Object(o) => {
             let pad = " ".repeat(ind);
-            out.push_str(&format!("{} Object\n{pad}(\n", o.class.name));
+            let kind = if o.class.kind == crate::ast::ClassKind::Enum {
+                match o.props.borrow().get(&Key::from_str("value")) {
+                    Some(Value::Int(_)) => "Enum:int".to_string(),
+                    Some(_) => "Enum:string".to_string(),
+                    None => "Enum".to_string(),
+                }
+            } else {
+                "Object".to_string()
+            };
+            out.push_str(&format!("{} {kind}\n{pad}(\n", o.class.name));
             for (k, x) in o.props.borrow().iter() {
                 let key = match k {
                     Key::Int(i) => i.to_string(),
@@ -756,6 +769,10 @@ fn var_export(v: &Value, ind: usize, out: &mut String) {
             }
         }
         Value::Str(t) => out.push_str(&format!("'{}'", t.replace('\\', "\\\\").replace('\'', "\\'"))),
+        Value::Object(o) if o.class.kind == crate::ast::ClassKind::Enum => {
+            let case = o.props.borrow().get(&Key::from_str("name")).map(|n| n.to_str().to_string()).unwrap_or_default();
+            out.push_str(&format!("\\{}::{case}", o.class.name));
+        }
         Value::Object(o) => {
             out.push_str(&format!("\\{}::__set_state(array(\n", o.class.name));
             for (k, x) in o.props.borrow().iter() {

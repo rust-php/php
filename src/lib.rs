@@ -153,6 +153,22 @@ mod tests {
     }
 
     #[test]
+    fn destructuring_generators_enums() {
+        t("[$a, $b] = [1, 2]; echo $a, $b; ['x' => $x, 'y' => $y] = ['x' => 3, 'y' => 4]; echo $x, $y; list(, $c) = [5, 6]; echo $c;", "12346");
+        t("foreach ([[1, 2], [3, 4]] as [$p, $q]) { echo $p + $q, ','; }", "3,7,");
+        t("[[$a, $b], $c] = [[1, 2], 3]; echo $a, $b, $c;", "123");
+        t("function g() { yield 1; yield 2; return 3; } $g = g(); foreach ($g as $v) { echo $v; } echo $g->getReturn();", "123");
+        t("function g() { yield 'a' => 1; yield 'b' => 2; } foreach (g() as $k => $v) { echo $k, $v; }", "a1b2");
+        t("function e() { $x = yield 1; echo 'got ', $x; $y = yield 2; echo $y; } $g = e(); echo $g->current(); echo $g->send('A'); $g->send('B');", "1got A2B");
+        t("function i() { yield 1; yield from [2, 3]; yield 4; } echo implode(',', iterator_to_array(i(), false));", "1,2,3,4");
+        t("function inner() { yield 1; return 'r'; } function outer() { $r = yield from inner(); echo $r; } foreach (outer() as $v) { echo $v; }", "1r");
+        t("enum S: string { case A = 'a'; case B = 'b'; public function label() { return ucfirst($this->value); } } echo S::A->value, S::from('b')->name, count(S::cases()), S::A->label(); var_dump(S::tryFrom('z'));", "aB2ANULL\n");
+        t("enum Suit { case H; case S; } var_dump(Suit::H === Suit::H, Suit::H === Suit::S); var_dump(Suit::H instanceof UnitEnum);", "bool(true)\nbool(false)\nbool(true)\n".replace("\\n", "\n").as_str());
+        t("$o = new class(3) { function __construct(public $n) {} function d() { return $this->n * 2; } }; echo $o->d();", "6");
+        t("$o = (object)['a' => 1]; echo $o->a; $o->b = 2; echo count((array)$o);", "12");
+    }
+
+    #[test]
     fn inline_html_and_errors() {
         assert_eq!(run_source("a<?php echo 1; ?>\nb").unwrap(), "a1b");
         assert!(run_source("<?php echo 1/0;").is_err());

@@ -42,6 +42,10 @@ pub struct Class {
     pub statics: RefCell<HashMap<String, Value>>,
     pub statics_ready: RefCell<bool>,
     pub methods: HashMap<String, Rc<Method>>,
+    pub cases: Vec<(String, Option<usize>)>,
+    pub backed: bool,
+    /// Enum case singletons, created on first use.
+    pub enum_vals: RefCell<Option<Vec<(String, Value)>>>,
 }
 
 impl Class {
@@ -68,6 +72,7 @@ impl Class {
 pub enum Extra {
     None,
     Closure(ClosureData),
+    Generator(Rc<RefCell<crate::vm::GenState>>),
 }
 
 #[derive(Clone)]

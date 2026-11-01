@@ -60,6 +60,8 @@ interface UnitEnum {}
 interface Throwable extends Stringable {}
 class stdClass {}
 final class Closure {}
+final class Generator implements Iterator {}
+interface BackedEnum extends UnitEnum {}
 ",
     );
     s.push_str(&format!("class Exception implements Throwable {{{THROWABLE_BODY}}}\n"));

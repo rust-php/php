@@ -74,6 +74,7 @@ pub enum Op {
     MakeClosure(u32, u8),
     // Exceptions and constants.
     Throw,
+    Yield(bool),
     JmpIfInstance(u32, u32),
     MatchError,
     ConstGet(u32),
@@ -97,6 +98,7 @@ pub struct Func {
     pub capture_slots: Vec<u16>,
     pub ref_params: Vec<bool>,
     pub variadic: bool,
+    pub is_generator: bool,
 }
 
 #[derive(Debug)]
@@ -127,6 +129,8 @@ pub struct ClassDef {
     pub consts: Vec<(String, usize)>,
     pub props: Vec<PropDef>,
     pub methods: Vec<MethodDef>,
+    pub cases: Vec<(String, Option<usize>)>,
+    pub backed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -158,10 +162,11 @@ struct Fc<'a> {
     /// Active `finally` blocks with the loop depth at which their `try` began.
     finallys: Vec<(Vec<Stmt>, usize)>,
     handlers: Vec<Handler>,
+    has_yield: bool,
 }
 
 fn new_fc(prog: &mut Program) -> Fc<'_> {
-    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![] };
+    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![], has_yield: false };
     fc.slot("this");
     fc
 }
@@ -175,7 +180,7 @@ pub fn compile(stmts: &[Stmt]) -> R<Program> {
     fc.code.push(Op::Halt);
     let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
     let main_locals = fc.locals.clone();
-    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false };
+    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false };
     prog.main_locals = main_locals;
     Ok(prog)
 }
@@ -203,7 +208,7 @@ fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
             expr_vars(b, out);
         }
         Expr::IncDec { target, .. } => expr_vars(target, out),
-        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) | Expr::Spread(a) => expr_vars(a, out),
+        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) | Expr::Spread(a) | Expr::YieldFrom(a) => expr_vars(a, out),
         Expr::Ternary(a, b, c) => {
             expr_vars(a, out);
             if let Some(b) = b {
@@ -406,7 +411,7 @@ impl Fc<'_> {
                 exits.into_iter().for_each(|e| self.patch(e, end));
                 self.finish_loop(cont, end);
             }
-            Stmt::Foreach { subject, key, val, by_ref, body } => {
+            Stmt::Foreach { subject, key, val, pattern, by_ref, body } => {
                 let arr = self.hidden();
                 let pos = self.hidden();
                 let ref_subject = match (by_ref, subject) {
@@ -432,6 +437,10 @@ impl Fc<'_> {
                     self.emit(Op::IterNext { arr, pos, key: kslot, val: vslot, exit: 0 })
                 };
                 self.new_loop(false);
+                if let Some(p) = pattern {
+                    let bind = Stmt::Expr(Expr::Assign(Box::new(p.clone()), Box::new(Expr::Var(val.clone()))));
+                    self.stmt(&bind)?;
+                }
                 self.block(body)?;
                 self.emit(Op::Jmp(top as u32));
                 let end = self.here();
@@ -709,7 +718,7 @@ impl Fc<'_> {
         sub.block(&f.body)?;
         sub.push_const(Value::Null);
         sub.emit(Op::Ret);
-        let (code, nlocals, handlers) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers));
+        let (code, nlocals, handlers, is_generator) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers), sub.has_yield);
         let idx = self.prog.funcs.len();
         self.prog.funcs.push(Func {
             name: f.name.clone(),
@@ -720,6 +729,7 @@ impl Fc<'_> {
             capture_slots,
             ref_params: f.params.iter().map(|p| p.by_ref).collect(),
             variadic: f.params.last().is_some_and(|p| p.variadic),
+            is_generator,
         });
         Ok(idx)
     }
@@ -740,7 +750,16 @@ impl Fc<'_> {
             consts: vec![],
             props: vec![],
             methods: vec![],
+            cases: vec![],
+            backed: c.backed,
         };
+        for (n, e) in &c.cases {
+            let t = match e {
+                Some(e) => Some(self.thunk(e)?),
+                None => None,
+            };
+            def.cases.push((n.clone(), t));
+        }
         for (n, e) in &c.consts {
             let t = self.thunk(e)?;
             def.consts.push((n.clone(), t));
@@ -1002,6 +1021,40 @@ impl Fc<'_> {
                 self.emit(Op::CallValue(n, site));
             }
             Expr::Spread(_) => return Err("Cannot use spread operator here".into()),
+            Expr::Hole | Expr::List(_) => return Err("Cannot use list() outside of an assignment".into()),
+            Expr::Yield(k, v) => {
+                self.has_yield = true;
+                if let Some(k) = k {
+                    self.expr(k)?;
+                }
+                match v {
+                    Some(v) => self.expr(v)?,
+                    None => self.push_const(Value::Null),
+                }
+                self.emit(Op::Yield(k.is_some()));
+            }
+            Expr::YieldFrom(inner) => {
+                self.has_yield = true;
+                let n = self.locals.len();
+                let (src, k, v) = (format!("#ys{n}"), format!("#yk{n}"), format!("#yv{n}"));
+                self.expr(&Expr::Assign(Box::new(Expr::Var(src.clone())), inner.clone()))?;
+                self.emit(Op::Pop);
+                let looped = Stmt::Foreach {
+                    subject: Expr::Var(src.clone()),
+                    key: Some(k.clone()),
+                    val: v.clone(),
+                    pattern: None,
+                    by_ref: false,
+                    body: vec![Stmt::Expr(Expr::Yield(Some(Box::new(Expr::Var(k))), Some(Box::new(Expr::Var(v)))))],
+                };
+                self.stmt(&looped)?;
+                let ret = Expr::Ternary(
+                    Box::new(Expr::Instanceof(Box::new(Expr::Var(src.clone())), ClassRef::Named("Generator".into()))),
+                    Some(Box::new(Expr::MethodCall { obj: Box::new(Expr::Var(src)), name: Box::new(Expr::Str("getReturn".into())), args: vec![], nullsafe: false })),
+                    Box::new(Expr::Const("null".into())),
+                );
+                self.expr(&ret)?;
+            }
             Expr::AssignRef(target, src) => match (&**target, &**src) {
                 (Expr::Var(a), Expr::Var(b)) => {
                     let (sa, sb) = (self.slot(a), self.slot(b));
@@ -1190,6 +1243,30 @@ impl Fc<'_> {
 
     /// Compile an assignment whose value is produced by `rhs`; leaves the assigned value on the stack.
     fn assign(&mut self, target: &Expr, rhs: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
+        if let Expr::List(items) = target {
+            rhs(self)?;
+            let name = format!("#l{}", self.locals.len());
+            let tmp = self.slot(&name);
+            self.emit(Op::Store(tmp));
+            let mut idx = 0i64;
+            for item in items {
+                let Some((k, t)) = item else {
+                    idx += 1;
+                    continue;
+                };
+                let key = match k {
+                    Some(k) => k.clone(),
+                    None => {
+                        idx += 1;
+                        Expr::Int(idx - 1)
+                    }
+                };
+                let src = Expr::Index(Box::new(Expr::Var(name.clone())), Some(Box::new(key)));
+                self.expr(&Expr::Assign(Box::new(t.clone()), Box::new(src)))?;
+                self.emit(Op::Pop);
+            }
+            return Ok(());
+        }
         let (base, dims) = flatten(target)?;
         let has_dims = !dims.is_empty();
         let shape_of = |dims: &[Option<&Expr>]| dims.iter().map(|d| d.is_some()).collect::<Vec<bool>>();

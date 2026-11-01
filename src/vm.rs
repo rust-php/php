@@ -34,12 +34,30 @@ pub struct CallCtx {
     pub caps: Vec<Value>,
 }
 
-struct Frame {
+pub(crate) struct Frame {
     locals: Vec<Value>,
     st: Vec<Value>,
     pc: usize,
     argc: usize,
     ctx: CallCtx,
+}
+
+/// State of a suspended generator function.
+pub struct GenState {
+    frame: Option<Frame>,
+    func: usize,
+    started: bool,
+    done: bool,
+    running: bool,
+    key: Value,
+    val: Value,
+    auto_key: i64,
+    ret: Value,
+}
+
+pub enum Step {
+    Return(Value),
+    Yield(Option<Value>, Value),
 }
 
 pub struct Vm<'p> {
@@ -115,6 +133,12 @@ impl<'p> Vm<'p> {
             interfaces.push(lc(&ic.name));
             interfaces.extend(ic.interfaces.iter().cloned());
         }
+        if def.kind == ClassKind::Enum {
+            interfaces.push("unitenum".into());
+            if def.backed {
+                interfaces.push("backedenum".into());
+            }
+        }
         interfaces.sort();
         interfaces.dedup();
         let mut methods = parent.as_ref().map(|p| p.methods.clone()).unwrap_or_default();
@@ -165,6 +189,9 @@ impl<'p> Vm<'p> {
             statics: RefCell::new(HashMap::new()),
             statics_ready: RefCell::new(false),
             methods,
+            cases: def.cases.clone(),
+            backed: def.backed,
+            enum_vals: RefCell::new(None),
         };
         self.classes.insert(lname, Rc::new(class));
         true
@@ -217,6 +244,10 @@ impl<'p> Vm<'p> {
         if name == "class" {
             return Ok(Value::str(&class.name));
         }
+        if class.kind == ClassKind::Enum && class.cases.iter().any(|(n, _)| n == name) {
+            let vals = self.enum_values(class)?;
+            return Ok(vals.into_iter().find(|(n, _)| n == name).map(|(_, v)| v).unwrap_or(Value::Null));
+        }
         let owner = self
             .const_owner(class, name)
             .ok_or_else(|| Flow::Fatal(format!("Undefined constant {}::{}", class.name, name)))?;
@@ -254,6 +285,7 @@ impl<'p> Vm<'p> {
             let what = match class.kind {
                 ClassKind::Interface => "interface",
                 ClassKind::Trait => "trait",
+                ClassKind::Enum => "enum",
                 ClassKind::Class => "abstract class",
             };
             return Err(Flow::Fatal(format!("Cannot instantiate {} {}", what, class.name)));
@@ -303,7 +335,13 @@ impl<'p> Vm<'p> {
         }
         self.depth += 1;
         let prog = self.prog;
-        let r = self.exec(&prog.funcs[idx], args, ctx);
+        let f = &prog.funcs[idx];
+        let r = if f.is_generator {
+            let fr = self.build_frame(f, args, ctx);
+            self.make_generator(idx, fr)
+        } else {
+            self.exec(f, args, ctx)
+        };
         self.depth -= 1;
         r
     }
@@ -320,7 +358,7 @@ impl<'p> Vm<'p> {
             Value::Object(o) => {
                 let cd = match &*o.extra.borrow() {
                     Extra::Closure(c) => Some(c.clone()),
-                    Extra::None => None,
+                    _ => None,
                 };
                 if let Some(cd) = cd {
                     return self.call_closure(&cd, args, None);
@@ -412,7 +450,7 @@ impl<'p> Vm<'p> {
         }
     }
 
-    fn exec(&mut self, f: &'p Func, args: Vec<Value>, ctx: CallCtx) -> R<Value> {
+    fn build_frame(&mut self, f: &'p Func, args: Vec<Value>, ctx: CallCtx) -> Frame {
         let mut locals = vec![Value::Null; f.nlocals];
         if let Some(t) = &ctx.this {
             locals[0] = t.clone();
@@ -442,11 +480,26 @@ impl<'p> Vm<'p> {
                 }
             }
         }
-        let mut fr = Frame { locals, st: Vec::with_capacity(16), pc: 0, argc, ctx };
+        Frame { locals, st: Vec::with_capacity(16), pc: 0, argc, ctx }
+    }
+
+    fn exec(&mut self, f: &'p Func, args: Vec<Value>, ctx: CallCtx) -> R<Value> {
+        let mut fr = self.build_frame(f, args, ctx);
+        match self.run_frame(f, &mut fr, None)? {
+            Step::Return(v) => Ok(v),
+            Step::Yield(..) => Err(Flow::Fatal("Cannot yield outside a generator".into())),
+        }
+    }
+
+    /// Run a frame to completion or the next `yield`, routing exceptions to its handlers.
+    fn run_frame(&mut self, f: &'p Func, fr: &mut Frame, mut pending: Option<Flow>) -> R<Step> {
         loop {
-            let err = match self.run(f, &mut fr) {
-                Ok(v) => return Ok(v),
-                Err(e) => e,
+            let err = match pending.take() {
+                Some(e) => e,
+                None => match self.run(f, fr) {
+                    Ok(step) => return Ok(step),
+                    Err(e) => e,
+                },
             };
             let err = self.to_throw(err);
             let Flow::Throw(v) = err else { return Err(err) };
@@ -462,7 +515,7 @@ impl<'p> Vm<'p> {
         }
     }
 
-    fn run(&mut self, f: &'p Func, fr: &mut Frame) -> R<Value> {
+    fn run(&mut self, f: &'p Func, fr: &mut Frame) -> R<Step> {
         let prog = self.prog;
         let code = &f.code;
         macro_rules! pop {
@@ -529,7 +582,23 @@ impl<'p> Vm<'p> {
                 }
                 Op::Cast(k) => {
                     let v = pop!();
-                    let r = if k == "string" { Value::Str(self.to_string_val(&v)?) } else { cast(k, v) };
+                    let r = if k == "string" {
+                        Value::Str(self.to_string_val(&v)?)
+                    } else if k == "object" {
+                        let std = self.find_class("stdClass")?;
+                        match v {
+                            Value::Object(_) => v,
+                            Value::Array(a) => Value::Object(Obj::new(std, (*a).clone(), Extra::None)),
+                            Value::Null => Value::Object(Obj::new(std, PhpArray::new(), Extra::None)),
+                            other => {
+                                let mut p = PhpArray::new();
+                                p.set(Key::from_str("scalar"), other);
+                                Value::Object(Obj::new(std, p, Extra::None))
+                            }
+                        }
+                    } else {
+                        cast(k, v)
+                    };
                     fr.st.push(r);
                 }
                 Op::IsNotNull => {
@@ -705,7 +774,12 @@ impl<'p> Vm<'p> {
                     let r = self.call_value(&callee, args)?;
                     fr.st.push(r);
                 }
-                Op::Ret => return Ok(pop!()),
+                Op::Ret => return Ok(Step::Return(pop!())),
+                Op::Yield(has_key) => {
+                    let v = pop!();
+                    let k = if has_key { Some(pop!()) } else { None };
+                    return Ok(Step::Yield(k, v));
+                }
                 Op::Exit => {
                     let v = pop!();
                     return Err(match v {
@@ -726,7 +800,7 @@ impl<'p> Vm<'p> {
                         fr.pc = t as usize;
                     }
                 }
-                Op::Halt => return Ok(Value::Null),
+                Op::Halt => return Ok(Step::Return(Value::Null)),
                 Op::MakeRef(slot) => {
                     let cell = make_ref_cell(&mut fr.locals[slot as usize]);
                     fr.st.push(Value::Ref(cell));
@@ -974,6 +1048,7 @@ impl<'p> Vm<'p> {
                     let extra = match &*o.extra.borrow() {
                         Extra::None => Extra::None,
                         Extra::Closure(c) => Extra::Closure(c.clone()),
+                        Extra::Generator(_) => return self.throw_error("Error", "Trying to clone an uncloneable object of class Generator"),
                     };
                     let copy = Value::Object(Obj::new(o.class.clone(), o.props.borrow().clone(), extra));
                     if let Some(m) = o.class.find_method("__clone") {
@@ -1063,6 +1138,153 @@ impl<'p> Vm<'p> {
         }
     }
 
+    pub fn enum_values(&mut self, class: &Rc<Class>) -> R<Vec<(String, Value)>> {
+        if let Some(v) = &*class.enum_vals.borrow() {
+            return Ok(v.clone());
+        }
+        let mut out = Vec::new();
+        for (n, thunk) in &class.cases {
+            let mut props = PhpArray::new();
+            props.set(Key::from_str("name"), Value::str(n));
+            if let Some(t) = thunk {
+                let v = self.run_thunk(*t, class)?;
+                props.set(Key::from_str("value"), v);
+            }
+            out.push((n.clone(), Value::Object(Obj::new(class.clone(), props, Extra::None))));
+        }
+        *class.enum_vals.borrow_mut() = Some(out.clone());
+        Ok(out)
+    }
+
+    fn enum_static(&mut self, class: &Rc<Class>, lname: &str, args: &[Value]) -> R<Option<Value>> {
+        match lname {
+            "cases" => {
+                let vals = self.enum_values(class)?;
+                Ok(Some(Value::Array(Rc::new(PhpArray::from_list(vals.into_iter().map(|(_, v)| v).collect())))))
+            }
+            "from" | "tryfrom" if class.backed => {
+                let needle = args.first().cloned().unwrap_or(Value::Null);
+                let vals = self.enum_values(class)?;
+                for (_, v) in &vals {
+                    if let Value::Object(o) = v {
+                        if o.props.borrow().get(&Key::from_str("value")).is_some_and(|x| loose_eq(x, &needle) && matches!((x, &needle), (Value::Int(_), Value::Int(_) | Value::Str(_) | Value::Float(_)) | (Value::Str(_), Value::Str(_) | Value::Int(_)))) {
+                            return Ok(Some(v.clone()));
+                        }
+                    }
+                }
+                if lname == "tryfrom" {
+                    return Ok(Some(Value::Null));
+                }
+                let repr = match &needle {
+                    Value::Str(s) => format!("\"{s}\""),
+                    other => other.to_str().to_string(),
+                };
+                self.throw_error("ValueError", &format!("{repr} is not a valid backing value for enum {}", class.name))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn make_generator(&mut self, func: usize, frame: Frame) -> R<Value> {
+        let class = self.find_class("Generator")?;
+        let st = GenState { frame: Some(frame), func, started: false, done: false, running: false, key: Value::Null, val: Value::Null, auto_key: 0, ret: Value::Null };
+        Ok(Value::Object(Obj::new(class, PhpArray::new(), Extra::Generator(Rc::new(RefCell::new(st))))))
+    }
+
+    fn gen_advance(&mut self, g: &Rc<RefCell<GenState>>, send: Option<Value>, throw: Option<Value>) -> R<()> {
+        let (mut fr, func, was_started) = {
+            let mut st = g.borrow_mut();
+            if st.done {
+                return Ok(());
+            }
+            if st.running {
+                drop(st);
+                return self.throw_error("Error", "Cannot resume an already running generator");
+            }
+            let Some(fr) = st.frame.take() else { return Ok(()) };
+            st.running = true;
+            let was = st.started;
+            st.started = true;
+            (fr, st.func, was)
+        };
+        let prog = self.prog;
+        let f = &prog.funcs[func];
+        let mut pending = None;
+        if was_started {
+            match throw {
+                Some(ex) => pending = Some(Flow::Throw(ex)),
+                None => fr.st.push(send.unwrap_or(Value::Null)),
+            }
+        }
+        let res = self.run_frame(f, &mut fr, pending);
+        let mut st = g.borrow_mut();
+        st.running = false;
+        match res {
+            Ok(Step::Yield(k, v)) => {
+                st.val = v;
+                st.key = match k {
+                    Some(k) => {
+                        if let Value::Int(i) = &k {
+                            if *i >= st.auto_key {
+                                st.auto_key = *i + 1;
+                            }
+                        }
+                        k
+                    }
+                    None => {
+                        let k = Value::Int(st.auto_key);
+                        st.auto_key += 1;
+                        k
+                    }
+                };
+                st.frame = Some(fr);
+                Ok(())
+            }
+            Ok(Step::Return(v)) => {
+                st.done = true;
+                st.ret = v;
+                st.val = Value::Null;
+                st.key = Value::Null;
+                Ok(())
+            }
+            Err(e) => {
+                st.done = true;
+                st.val = Value::Null;
+                st.key = Value::Null;
+                Err(e)
+            }
+        }
+    }
+
+    fn generator_method(&mut self, g: &Rc<RefCell<GenState>>, lname: &str, args: Vec<Value>) -> R<Value> {
+        if !g.borrow().started && lname != "getreturn" {
+            self.gen_advance(g, None, None)?;
+            if matches!(lname, "rewind" | "current" | "key" | "valid") {
+                // fallthrough to the accessors below
+            }
+        }
+        match lname {
+            "current" => Ok(g.borrow().val.clone()),
+            "key" => Ok(g.borrow().key.clone()),
+            "valid" => Ok(Value::Bool(!g.borrow().done)),
+            "rewind" => Ok(Value::Null),
+            "next" => {
+                self.gen_advance(g, None, None)?;
+                Ok(Value::Null)
+            }
+            "send" => {
+                self.gen_advance(g, Some(args.into_iter().next().unwrap_or(Value::Null)), None)?;
+                Ok(g.borrow().val.clone())
+            }
+            "throw" => {
+                self.gen_advance(g, None, Some(args.into_iter().next().unwrap_or(Value::Null)))?;
+                Ok(g.borrow().val.clone())
+            }
+            "getreturn" => Ok(g.borrow().ret.clone()),
+            other => self.throw_error("Error", &format!("Call to undefined method Generator::{other}()")),
+        }
+    }
+
     /// Elements of an array or Traversable, for `...$spread`.
     fn spread_items(&mut self, src: &Value) -> R<Vec<(Key, Value)>> {
         match src {
@@ -1091,9 +1313,16 @@ impl<'p> Vm<'p> {
             return self.throw_error("Error", &format!("Call to a member function {}() on {}", name, obj.type_name()));
         };
         let lname = lc(name);
+        let gen = match &*o.extra.borrow() {
+            Extra::Generator(g) => Some(g.clone()),
+            _ => None,
+        };
+        if let Some(g) = gen {
+            return self.generator_method(&g, &lname, args);
+        }
         let closure = match &*o.extra.borrow() {
             Extra::Closure(c) => Some(c.clone()),
-            Extra::None => None,
+            _ => None,
         };
         if let Some(cd) = closure {
             match lname.as_str() {
@@ -1153,6 +1382,11 @@ impl<'p> Vm<'p> {
         }
         let class = self.class_of(cv)?;
         let lname = lc(name);
+        if class.kind == ClassKind::Enum {
+            if let Some(v) = self.enum_static(&class, &lname, &args)? {
+                return Ok(v);
+            }
+        }
         match class.find_method(&lname) {
             Some(m) => {
                 let this = if m.is_static {

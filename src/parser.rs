@@ -5,17 +5,21 @@ use crate::lexer::{lex, Part, Tok};
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
-    let mut p = Parser { toks: lex(src)?, pos: 0 };
+    let mut p = Parser { toks: lex(src)?, pos: 0, anon: vec![] };
     let mut out = Vec::new();
     while *p.peek() != Tok::Eof {
         out.push(p.stmt()?);
     }
-    Ok(out)
+    let mut all: Vec<Stmt> = p.anon.drain(..).map(Stmt::Class).collect();
+    all.extend(out);
+    Ok(all)
 }
 
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Anonymous classes found while parsing; hoisted ahead of the program.
+    anon: Vec<ClassDecl>,
 }
 
 fn boxed(e: Expr) -> Box<Expr> {
@@ -233,14 +237,16 @@ impl Parser {
                 }
                 let mut key = None;
                 let mut by_ref = self.eat_op("&");
-                let mut val = self.var_name()?;
+                let mut pattern = None;
+                let mut val = self.foreach_target(&mut pattern)?;
                 if self.eat_op("=>") {
                     key = Some(val);
                     by_ref = self.eat_op("&");
-                    val = self.var_name()?;
+                    pattern = None;
+                    val = self.foreach_target(&mut pattern)?;
                 }
                 self.expect_op(")")?;
-                Ok(Stmt::Foreach { subject, key, val, by_ref, body: self.body()? })
+                Ok(Stmt::Foreach { subject, key, val, pattern, by_ref, body: self.body()? })
             }
             "switch" => {
                 self.pos += 1;
@@ -295,8 +301,8 @@ impl Parser {
                 let body = self.body()?;
                 Ok(Stmt::Func(FuncDecl { name, params, body }))
             }
-            "abstract" | "final" | "readonly" | "class" | "interface" | "trait"
-                if kw != "class" && kw != "interface" && kw != "trait" || matches!(self.peek_at(1), Tok::Ident(_)) =>
+            "abstract" | "final" | "readonly" | "class" | "interface" | "trait" | "enum"
+                if (kw != "class" && kw != "interface" && kw != "trait" && kw != "enum") || matches!(self.peek_at(1), Tok::Ident(_)) =>
             {
                 self.class_decl()
             }
@@ -395,6 +401,22 @@ impl Parser {
         }
     }
 
+    /// Loop variable of a foreach: a name, or a destructuring pattern (returned via a hidden name).
+    fn foreach_target(&mut self, pattern: &mut Option<Expr>) -> R<String> {
+        if self.is_op("[") || (self.is_kw("list") && matches!(self.peek_at(1), Tok::Op("("))) {
+            let e = if self.eat_op("[") {
+                self.array_lit("]")?
+            } else {
+                self.pos += 2;
+                self.array_lit(")")?
+            };
+            let Expr::Array(items) = e else { unreachable!() };
+            *pattern = Some(self.finish_pattern(items)?);
+            return Ok(format!("#fe{}", self.pos));
+        }
+        self.var_name()
+    }
+
     fn skip_return_type(&mut self) {
         if self.eat_op(":") {
             while matches!(self.peek(), Tok::Ident(_) | Tok::Op("?") | Tok::Op("|") | Tok::Op("&") | Tok::Op("(") | Tok::Op(")")) {
@@ -429,6 +451,8 @@ impl Parser {
         }
         let kind = if self.eat_kw("class") {
             ClassKind::Class
+        } else if self.eat_kw("enum") {
+            ClassKind::Enum
         } else if self.eat_kw("interface") {
             ClassKind::Interface
         } else if self.eat_kw("trait") {
@@ -437,7 +461,19 @@ impl Parser {
             return Err(format!("syntax error, unexpected {:?}, expecting class", self.peek()));
         };
         let name = self.ident()?;
+        let decl = self.class_rest(name, kind, is_abstract)?;
+        Ok(Stmt::Class(decl))
+    }
+
+    fn class_rest(&mut self, name: String, kind: ClassKind, is_abstract: bool) -> R<ClassDecl> {
         let (mut parent, mut interfaces) = (None, vec![]);
+        let mut backed = false;
+        if kind == ClassKind::Enum && self.eat_op(":") {
+            backed = true;
+            while matches!(self.peek(), Tok::Ident(_)) {
+                self.pos += 1;
+            }
+        }
         if self.eat_kw("extends") {
             if kind == ClassKind::Interface {
                 interfaces = self.name_list()?;
@@ -449,7 +485,7 @@ impl Parser {
             interfaces = self.name_list()?;
         }
         self.expect_op("{")?;
-        let mut decl = ClassDecl { name, kind, is_abstract, parent, interfaces, traits: vec![], consts: vec![], props: vec![], methods: vec![] };
+        let mut decl = ClassDecl { name, kind, is_abstract, parent, interfaces, traits: vec![], consts: vec![], props: vec![], methods: vec![], cases: vec![], backed };
         while !self.eat_op("}") {
             if self.eat_kw("use") {
                 decl.traits.extend(self.name_list()?);
@@ -471,6 +507,13 @@ impl Parser {
                 } else {
                     self.end_stmt()?;
                 }
+                continue;
+            }
+            if kind == ClassKind::Enum && self.eat_kw("case") {
+                let n = self.ident()?;
+                let v = if self.eat_op("=") { Some(self.expr(0)?) } else { None };
+                self.end_stmt()?;
+                decl.cases.push((n, v));
                 continue;
             }
             let (mut vis, mut is_static, mut m_abstract) = (0u8, false, false);
@@ -531,7 +574,7 @@ impl Parser {
                 self.end_stmt()?;
             }
         }
-        Ok(Stmt::Class(decl))
+        Ok(decl)
     }
 
     fn params(&mut self) -> R<Vec<Param>> {
@@ -652,6 +695,7 @@ impl Parser {
                         "string" | "binary" => Some("string"),
                         "bool" | "boolean" => Some("bool"),
                         "array" => Some("array"),
+                        "object" => Some("object"),
                         _ => None,
                     };
                     if let Some(k) = kind {
@@ -691,6 +735,32 @@ impl Parser {
                     self.pos += 1;
                     Ok(Expr::Clone(boxed(self.postfix()?)))
                 }
+                "yield" => {
+                    self.pos += 1;
+                    if self.eat_kw("from") {
+                        return Ok(Expr::YieldFrom(boxed(self.expr(4)?)));
+                    }
+                    if matches!(self.peek(), Tok::Op(";" | ")" | "," | "]")) || *self.peek() == Tok::Eof {
+                        return Ok(Expr::Yield(None, None));
+                    }
+                    let first = self.expr(5)?;
+                    if self.eat_op("=>") {
+                        let v = self.expr(5)?;
+                        return Ok(Expr::Yield(Some(boxed(first)), Some(boxed(v))));
+                    }
+                    Ok(Expr::Yield(None, Some(boxed(first))))
+                }
+                "list" if matches!(self.peek_at(1), Tok::Op("(")) => {
+                    self.pos += 2;
+                    let items = self.array_lit(")")?;
+                    let Expr::Array(items) = items else { unreachable!() };
+                    let pattern = self.finish_pattern(items)?;
+                    if self.eat_op("=") {
+                        let rhs = self.expr(4)?;
+                        return Ok(Expr::Assign(boxed(pattern), boxed(rhs)));
+                    }
+                    Ok(pattern)
+                }
                 "throw" => {
                     self.pos += 1;
                     Ok(Expr::Throw(boxed(self.expr(0)?)))
@@ -698,7 +768,20 @@ impl Parser {
                 "new" => {
                     self.pos += 1;
                     let cref = match self.peek().clone() {
-                        Tok::Ident(n) if n.eq_ignore_ascii_case("class") => return Err("anonymous classes are not supported yet".into()),
+                        Tok::Ident(n) if n.eq_ignore_ascii_case("class") => {
+                            self.pos += 1;
+                            let args = if self.eat_op("(") {
+                                let a = self.expr_list(")")?;
+                                self.expect_op(")")?;
+                                a
+                            } else {
+                                vec![]
+                            };
+                            let name = format!("class@anonymous\0{}", self.anon.len());
+                            let decl = self.class_rest(name.clone(), ClassKind::Class, false)?;
+                            self.anon.push(decl);
+                            return self.postfix_ops(Expr::New(ClassRef::Named(name), args));
+                        }
                         Tok::Ident(n) => {
                             self.pos += 1;
                             ClassRef::Named(n)
@@ -830,6 +913,19 @@ impl Parser {
         }
     }
 
+    /// Turn the items of an array literal into a destructuring pattern.
+    fn finish_pattern(&mut self, items: Vec<(Option<Expr>, Expr)>) -> R<Expr> {
+        let mut out = Vec::new();
+        for (k, v) in items {
+            out.push(match v {
+                Expr::Hole => None,
+                Expr::Array(inner) => Some((k, self.finish_pattern(inner)?)),
+                other => Some((k, other)),
+            });
+        }
+        Ok(Expr::List(out))
+    }
+
     fn closure(&mut self) -> R<Expr> {
         let arrow = self.is_kw("fn");
         self.pos += 1;
@@ -893,6 +989,15 @@ impl Parser {
                 e = Expr::IncDec { target: boxed(e), inc: o == "++", prefix: false };
             }
         }
+        if matches!(e, Expr::Array(_) | Expr::List(_)) && self.is_op("=") {
+            self.pos += 1;
+            let rhs = self.expr(4)?;
+            let pattern = match e {
+                Expr::Array(items) => self.finish_pattern(items)?,
+                other => other,
+            };
+            return Ok(Expr::Assign(boxed(pattern), boxed(rhs)));
+        }
         if is_lvalue(&e) {
             if let Tok::Op(o) = self.peek().clone() {
                 if o == "=" {
@@ -949,6 +1054,11 @@ impl Parser {
     fn array_lit(&mut self, end: &str) -> R<Expr> {
         let mut items = Vec::new();
         while !self.is_op(end) {
+            if self.is_op(",") {
+                self.pos += 1;
+                items.push((None, Expr::Hole));
+                continue;
+            }
             if self.eat_op("...") {
                 items.push((None, Expr::Spread(boxed(self.expr(0)?))));
                 if !self.eat_op(",") {
@@ -977,7 +1087,7 @@ fn template(parts: &[Part]) -> R<Expr> {
         let e = match p {
             Part::Lit(s) => Expr::Str(s.clone()),
             Part::Code(code) => {
-                let mut sub = Parser { toks: lex(&format!("<?php {code};"))?, pos: 0 };
+                let mut sub = Parser { toks: lex(&format!("<?php {code};"))?, pos: 0, anon: vec![] };
                 sub.expr(0)?
             }
         };
