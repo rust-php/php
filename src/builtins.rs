@@ -71,6 +71,15 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
         let mut map_all: HashMap<&'static str, Builtin> = HashMap::new();
         crate::stdlib_str::register(&mut map_all);
         crate::stdlib_arr::register(&mut map_all);
+        for n in ["preg_quote", "preg_split", "preg_grep", "preg_last_error", "preg_last_error_msg"] {
+            map_all.insert(n, match n {
+                "preg_quote" => |_, a| crate::stdlib_preg::simple("preg_quote", &a).unwrap(),
+                "preg_split" => |_, a| crate::stdlib_preg::simple("preg_split", &a).unwrap(),
+                "preg_grep" => |_, a| crate::stdlib_preg::simple("preg_grep", &a).unwrap(),
+                "preg_last_error" => |_, a| crate::stdlib_preg::simple("preg_last_error", &a).unwrap(),
+                _ => |_, a| crate::stdlib_preg::simple("preg_last_error_msg", &a).unwrap(),
+            });
+        }
         let list: &[(&str, Builtin)] = &[
             ("strlen", |_, a| Ok(Value::Int(arg(&a, 0).to_str().len() as i64))),
             ("count", |_, a| match a.first() {
@@ -196,7 +205,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
             ("sprintf", |_, a| sprintf(&a).map(|r| s(&r))),
             ("printf", |vm, a| {
                 let r = sprintf(&a)?;
-                vm.out.push_str(&r);
+                vm.write(&r);
                 Ok(Value::Int(r.len() as i64))
             }),
             ("number_format", |_, a| {
@@ -275,7 +284,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
                 if a.get(1).is_some_and(Value::to_bool) {
                     return Ok(s(&out));
                 }
-                vm.out.push_str(&out);
+                vm.write(&out);
                 Ok(Value::Bool(true))
             }),
             ("var_export", |vm, a| {
@@ -284,7 +293,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
                 if a.get(1).is_some_and(Value::to_bool) {
                     return Ok(s(&out));
                 }
-                vm.out.push_str(&out);
+                vm.write(&out);
                 Ok(Value::Null)
             }),
             ("array_keys", |_, a| Ok(arr(need_arr(&a, 0, "array_keys")?.iter().map(|(k, _)| k.to_value()).collect()))),
@@ -958,6 +967,44 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
             ("assert", |_, _| bool_v(true)),
             ("spl_autoload_register", |_, _| bool_v(true)),
             ("get_called_class", |_, _| bool_v(false)),
+            ("ob_start", |vm, _| {
+                vm.ob.push(String::new());
+                bool_v(true)
+            }),
+            ("ob_get_clean", |vm, _| Ok(vm.ob.pop().map(|b| s(&b)).unwrap_or(Value::Bool(false)))),
+            ("ob_get_contents", |vm, _| Ok(vm.ob.last().map(|b| s(b)).unwrap_or(Value::Bool(false)))),
+            ("ob_get_length", |vm, _| Ok(vm.ob.last().map(|b| Value::Int(b.len() as i64)).unwrap_or(Value::Bool(false)))),
+            ("ob_get_level", |vm, _| Ok(Value::Int(vm.ob.len() as i64))),
+            ("ob_end_clean", |vm, _| bool_v(vm.ob.pop().is_some())),
+            ("ob_clean", |vm, _| {
+                if let Some(b) = vm.ob.last_mut() {
+                    b.clear();
+                }
+                bool_v(true)
+            }),
+            ("ob_end_flush", |vm, _| match vm.ob.pop() {
+                Some(b) => {
+                    vm.write(&b);
+                    bool_v(true)
+                }
+                None => bool_v(false),
+            }),
+            ("ob_get_flush", |vm, _| match vm.ob.pop() {
+                Some(b) => {
+                    vm.write(&b);
+                    Ok(s(&b))
+                }
+                None => bool_v(false),
+            }),
+            ("ob_flush", |vm, _| {
+                if let Some(b) = vm.ob.pop() {
+                    vm.write(&b);
+                    vm.ob.push(String::new());
+                }
+                bool_v(true)
+            }),
+            ("flush", |_, _| Ok(Value::Null)),
+            ("ob_implicit_flush", |_, _| Ok(Value::Null)),
             ("gc_collect_cycles", |_, _| Ok(Value::Int(0))),
             ("gc_enable", |_, _| Ok(Value::Null)),
             ("gc_disable", |_, _| Ok(Value::Null)),

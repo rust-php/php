@@ -64,6 +64,8 @@ pub enum Step {
 
 pub struct Vm<'p> {
     pub prog: &'p Program,
+    prog_ptr: *mut Program,
+    included: std::collections::HashSet<String>,
     pub out: String,
     pub file: String,
     pub classes: HashMap<String, Rc<Class>>,
@@ -74,6 +76,8 @@ pub struct Vm<'p> {
     pub shutdown: Vec<(Value, Vec<Value>)>,
     pub fiber_stack: Vec<Value>,
     pub json_error: (i64, &'static str),
+    /// Output-buffer stack (`ob_start`); the last entry receives output.
+    pub ob: Vec<String>,
     statics: HashMap<u32, Rc<RefCell<Value>>>,
     depth: usize,
 }
@@ -85,8 +89,27 @@ fn lc(s: &str) -> String {
 }
 
 impl<'p> Vm<'p> {
-    pub fn new(prog: &'p Program) -> Self {
-        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), json_error: (0, "No error"), statics: HashMap::new(), depth: 0 }
+    pub fn new(prog: &'p mut Program) -> Self {
+        let prog_ptr: *mut Program = prog;
+        // SAFETY: the program is only extended (never shrunk or reordered) while running; funcs are boxed so
+        // references to existing functions stay valid.
+        let prog: &'p Program = unsafe { &*prog_ptr };
+        Vm { prog, prog_ptr, included: Default::default(), out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), json_error: (0, "No error"), ob: Vec::new(), statics: HashMap::new(), depth: 0 }
+    }
+
+    /// Append to the active output buffer, or to the real output.
+    pub fn write(&mut self, s: &str) {
+        match self.ob.last_mut() {
+            Some(b) => b.push_str(s),
+            None => self.out.push_str(s),
+        }
+    }
+
+    /// Flush every open output buffer into the real output (end of script).
+    pub fn flush_buffers(&mut self) {
+        while let Some(b) = self.ob.pop() {
+            self.write(&b);
+        }
     }
 
     pub fn run_main(&mut self) -> R<()> {
@@ -587,7 +610,7 @@ impl<'p> Vm<'p> {
                 Op::Echo => {
                     let v = pop!();
                     let s = self.to_string_val(&v)?;
-                    self.out.push_str(&s);
+                    self.write(&s);
                 }
                 Op::Bin(o) => {
                     let b = pop!();
@@ -728,6 +751,16 @@ impl<'p> Vm<'p> {
                     let ks = split_args!(n);
                     let keys: Vec<Key> = ks.iter().map(Key::from_value).collect::<Result<_, _>>()?;
                     with_local_mut(&mut fr.locals, slot, |cur| unset_dim(cur, &keys));
+                }
+                Op::Eval => {
+                    let code = pop!().to_str();
+                    let r = self.run_snippet(fr, f, format!("<?php {code}"), "eval()'d code", false)?;
+                    fr.st.push(r);
+                }
+                Op::Include(kind) => {
+                    let path = pop!().to_str();
+                    let r = self.include_file(fr, f, &path, kind)?;
+                    fr.st.push(r);
                 }
                 Op::LoadVar => {
                     let name = pop!().to_str();
@@ -929,7 +962,7 @@ impl<'p> Vm<'p> {
                         Value::Int(i) => Flow::Exit(i as i32),
                         Value::Null => Flow::Exit(0),
                         v => {
-                            self.out.push_str(&v.to_str());
+                            self.write(&v.to_str());
                             Flow::Exit(0)
                         }
                     });
@@ -1623,6 +1656,83 @@ impl<'p> Vm<'p> {
             }
         }
         Ok(args)
+    }
+
+    /// Compile and run source text in the caller's variable scope (`eval`, `include`).
+    fn run_snippet(&mut self, fr: &mut Frame, f: &'p Func, src: String, file: &str, is_include: bool) -> R<Value> {
+        let stmts = match crate::parser::parse(&src) {
+            Ok(s) => s,
+            Err(e) => return self.throw_error("ParseError", e.trim_start_matches("PHP Parse error: ")),
+        };
+        // SAFETY: see Vm::new; no references into the program's vectors are held across this call.
+        let prog = unsafe { &mut *self.prog_ptr };
+        let first_class = prog.classes.len();
+        let idx = match crate::compiler::compile_snippet(prog, &stmts) {
+            Ok(i) => i,
+            Err(e) => return self.throw_error("Error", &e),
+        };
+        let mut pending: Vec<usize> = (first_class..prog.classes.len()).collect();
+        loop {
+            let before = pending.len();
+            pending.retain(|&i| !self.try_declare(i));
+            if pending.is_empty() || pending.len() == before {
+                break;
+            }
+        }
+        let sf: &'p Func = &self.prog.funcs[idx];
+        let mut sframe = self.build_frame(sf, vec![], fr.ctx.clone());
+        for (slot, name) in sf.local_names.iter().enumerate() {
+            if name.is_empty() || name == "this" {
+                continue;
+            }
+            if let Some(cs) = f.local_names.iter().position(|n| n == name) {
+                sframe.locals[slot] = Value::Ref(make_ref_cell(&mut fr.locals[cs]));
+            } else if let Some(v) = fr.dyn_vars.get(name) {
+                sframe.locals[slot] = v.clone();
+            }
+        }
+        let saved_file = std::mem::replace(&mut self.file, file.to_string());
+        let result = self.run_frame(sf, &mut sframe, None);
+        self.file = saved_file;
+        for (slot, name) in sf.local_names.iter().enumerate() {
+            if name.is_empty() || name == "this" || name.starts_with('#') || f.local_names.contains(name) {
+                continue;
+            }
+            fr.dyn_vars.insert(name.clone(), get_local(&sframe.locals, slot as u16));
+        }
+        match result? {
+            Step::Return(v) => Ok(if is_include && matches!(v, Value::Null) { Value::Int(1) } else { v }),
+            Step::Yield(..) => Ok(Value::Null),
+        }
+    }
+
+    fn include_file(&mut self, fr: &mut Frame, f: &'p Func, path: &str, kind: u8) -> R<Value> {
+        let require = kind >= 2;
+        let once = kind % 2 == 1;
+        let mut candidates = vec![std::path::PathBuf::from(path)];
+        if !path.starts_with('/') {
+            if let Some(dir) = std::path::Path::new(&self.file).parent() {
+                candidates.push(dir.join(path));
+            }
+        }
+        let found = candidates.into_iter().find(|p| p.is_file());
+        let Some(found) = found else {
+            let verb = ["include", "include_once", "require", "require_once"][kind as usize];
+            if require {
+                return self.throw_error("Error", &format!("Failed opening required '{path}' (include_path='.:/usr/share/php')"));
+            }
+            let _ = verb;
+            return Ok(Value::Bool(false));
+        };
+        let canon = std::fs::canonicalize(&found).map(|p| p.display().to_string()).unwrap_or_else(|_| found.display().to_string());
+        if once && !self.included.insert(canon.clone()) {
+            return Ok(Value::Bool(true));
+        }
+        if !once {
+            self.included.insert(canon.clone());
+        }
+        let src = std::fs::read_to_string(&found).unwrap_or_default();
+        self.run_snippet(fr, f, src, &canon, true)
     }
 
     /// Elements of an array or Traversable, for `...$spread`.

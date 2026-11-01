@@ -89,6 +89,8 @@ pub enum Op {
     MatchError,
     ConstGet(u32),
     DefConst(u32),
+    Eval,
+    Include(u8),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,7 +153,7 @@ pub struct ClassDef {
 pub struct Program {
     pub consts: Vec<Value>,
     pub shapes: Vec<Vec<bool>>,
-    pub funcs: Vec<Func>,
+    pub funcs: Vec<Box<Func>>,
     pub func_index: HashMap<String, usize>,
     pub classes: Vec<ClassDef>,
     pub main: Func,
@@ -187,19 +189,33 @@ fn new_fc(prog: &mut Program) -> Fc<'_> {
     fc
 }
 
-pub fn compile(stmts: &[Stmt]) -> R<Program> {
-    let mut prog = Program::default();
-    let mut fc = new_fc(&mut prog);
+/// Compile top-level statements into a function body (`{main}`-style), returning it with its slot map.
+fn build_main(prog: &mut Program, stmts: &[Stmt]) -> R<(Func, HashMap<String, u16>)> {
+    let mut fc = new_fc(prog);
     for s in stmts {
         fc.stmt(s)?;
     }
     fc.code.push(Op::Halt);
     let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
-    let main_locals = fc.locals.clone();
-    let main_names = names_by_slot(&main_locals);
-    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false, param_names: vec![], local_names: main_names };
-    prog.main_locals = main_locals;
+    let locals = fc.locals.clone();
+    let names = names_by_slot(&locals);
+    let func = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false, param_names: vec![], local_names: names };
+    Ok((func, locals))
+}
+
+pub fn compile(stmts: &[Stmt]) -> R<Program> {
+    let mut prog = Program::default();
+    let (main, locals) = build_main(&mut prog, stmts)?;
+    prog.main = main;
+    prog.main_locals = locals;
     Ok(prog)
+}
+
+/// Compile code loaded at run time (`eval`, `include`) into an existing program; returns the new function's index.
+pub fn compile_snippet(prog: &mut Program, stmts: &[Stmt]) -> R<usize> {
+    let (func, _) = build_main(prog, stmts)?;
+    prog.funcs.push(Box::new(func));
+    Ok(prog.funcs.len() - 1)
 }
 
 fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
@@ -769,7 +785,7 @@ impl Fc<'_> {
         let (code, nlocals, handlers, is_generator) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers), sub.has_yield);
         let local_names = names_by_slot(&sub.locals);
         let idx = self.prog.funcs.len();
-        self.prog.funcs.push(Func {
+        self.prog.funcs.push(Box::new(Func {
             name: f.name.clone(),
             nparams: f.params.len(),
             nlocals,
@@ -781,7 +797,7 @@ impl Fc<'_> {
             is_generator,
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             local_names,
-        });
+        }));
         Ok(idx)
     }
 
@@ -1067,6 +1083,11 @@ impl Fc<'_> {
                     return Ok(());
                 }
                 match lname.as_str() {
+                    "eval" => {
+                        self.args(args)?;
+                        self.emit(Op::Eval);
+                        return Ok(());
+                    }
                     "compact" => {
                         let n = self.args(args)?;
                         self.emit(Op::Compact(n));
@@ -1101,6 +1122,10 @@ impl Fc<'_> {
                 let n = self.args(args)?;
                 let site = self.site(args);
                 self.emit(Op::CallValue(n, site));
+            }
+            Expr::Include(kind, inner) => {
+                self.expr(inner)?;
+                self.emit(Op::Include(*kind));
             }
             Expr::Spread(_) | Expr::NamedArg(..) => return Err("Cannot use spread operator here".into()),
             Expr::VarVar(inner) => {

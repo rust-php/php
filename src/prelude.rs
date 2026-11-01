@@ -44,6 +44,8 @@ const SIMPLE: &[(&str, &str)] = &[
     ("UnderflowException", "RuntimeException"),
     ("UnexpectedValueException", "RuntimeException"),
     ("JsonException", "Exception"),
+    ("CompileError", "Error"),
+    ("ParseError", "CompileError"),
     ("FiberError", "Error"),
 ];
 

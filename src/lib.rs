@@ -9,6 +9,7 @@ pub mod prelude;
 pub mod refbuiltins;
 pub mod stdlib_arr;
 pub mod stdlib_data;
+pub mod stdlib_preg;
 pub mod stdlib_str;
 pub mod value;
 pub mod vm;
@@ -35,11 +36,11 @@ pub fn execute_file(src: &str, file: &str) -> Output {
         Err(e) => return Output { out: String::new(), fatal: Some(format!("PHP Parse error: {e}")), exit_code: 255 },
     };
     let all: Vec<ast::Stmt> = prelude.into_iter().chain(user).collect();
-    let prog = match compiler::compile(&all) {
+    let mut prog = match compiler::compile(&all) {
         Ok(p) => p,
         Err(e) => return Output { out: String::new(), fatal: Some(format!("PHP Fatal error: {e}")), exit_code: 255 },
     };
-    let mut machine = vm::Vm::new(&prog);
+    let mut machine = vm::Vm::new(&mut prog);
     machine.file = file.to_string();
     let (fatal, exit_code) = match machine.run_main() {
         Ok(()) => (None, 0),
@@ -47,6 +48,7 @@ pub fn execute_file(src: &str, file: &str) -> Output {
         Err(vm::Flow::Fatal(m)) => (Some(m), 255),
         Err(vm::Flow::Throw(v)) => (Some(machine.describe_uncaught(&v)), 255),
     };
+    machine.flush_buffers();
     Output { out: std::mem::take(&mut machine.out), fatal, exit_code }
 }
 
@@ -209,6 +211,17 @@ mod tests {
         t("echo md5('a'), ' ', crc32('hello'), ' ', base64_encode('hello'), ' ', strtoupper(bin2hex('ab'));", "0cc175b9c0f1b6a831c399e269772661 907060870 aGVsbG8= 6162");
         t("echo date('Y-m-d H:i:s', 86400 * 365), ' ', ucwords('hello big world'), ' ', str_pad('5', 3, '0', STR_PAD_LEFT);", "1971-01-01 00:00:00 Hello Big World 005");
         t("echo implode(',', array_diff([1, 2, 3, 4], [2, 4])), '|', implode(',', array_column([['id' => 1], ['id' => 2]], 'id')), '|', levenshtein('kitten', 'sitting');", "1,3|1,2|3");
+    }
+
+    #[test]
+    fn preg_and_buffers() {
+        t("echo preg_match('/(\\d+)-(\\d+)/', 'ab 12-34 cd', $m), $m[1], $m[2];", "11234");
+        t("echo preg_replace('/\\s+/', ' ', \"a  b\\n c\"), preg_replace('/(a)(b)?/', '[$1|$2]', 'ac');", "a b c[a|]c");
+        t("echo implode(',', preg_split('/[\\s,]+/', 'a, b  c,d'));", "a,b,c,d");
+        t("echo preg_match_all('/a(b)?/', 'ab a ab', $m), count($m), implode('', $m[0]);", "32aba ab".replace(' ', "").as_str());
+        t("echo preg_replace_callback('/\\d+/', fn($m) => $m[0] * 2, 'a1 b22');", "a2 b44");
+        t("echo preg_match('/(?<y>\\d{4})/', 'in 2024', $m), $m['y'];", "12024");
+        t("ob_start(); echo 'hidden'; $x = ob_get_clean(); echo strtoupper($x);", "HIDDEN");
     }
 
     #[test]

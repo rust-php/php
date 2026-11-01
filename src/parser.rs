@@ -774,6 +774,16 @@ impl Parser {
                     self.pos += 1;
                     Ok(Expr::Clone(boxed(self.postfix()?)))
                 }
+                "include" | "include_once" | "require" | "require_once" => {
+                    let kind = match w.to_ascii_lowercase().as_str() {
+                        "include" => 0,
+                        "include_once" => 1,
+                        "require" => 2,
+                        _ => 3,
+                    };
+                    self.pos += 1;
+                    Ok(Expr::Include(kind, boxed(self.expr(4)?)))
+                }
                 "yield" => {
                     self.pos += 1;
                     if self.eat_kw("from") {

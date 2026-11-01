@@ -11,6 +11,7 @@ pub fn ref_positions(name: &str) -> &'static [usize] {
         "sort" | "rsort" | "usort" | "uasort" | "uksort" | "asort" | "arsort" | "ksort" | "krsort" | "shuffle" | "array_push" | "array_pop"
         | "array_shift" | "array_unshift" | "array_splice" | "reset" | "end" | "next" | "prev" | "array_walk" | "natsort" | "natcasesort" => &[0],
         "preg_match" | "preg_match_all" => &[2],
+        "preg_replace" | "preg_replace_callback" => &[4],
         "str_replace" | "str_ireplace" => &[3],
         "settype" => &[0],
         _ => &[],
@@ -72,7 +73,10 @@ fn type_err<T>(vm: &mut Vm<'_>, f: &str, v: &Value) -> R<T> {
 }
 
 pub fn call_ref(vm: &mut Vm<'_>, name: &str, args: &mut Vec<Value>) -> Option<R<Value>> {
-    if matches!(name, "settype" | "str_replace" | "str_ireplace" | "preg_match" | "preg_match_all") {
+    if matches!(name, "preg_match" | "preg_match_all" | "preg_replace" | "preg_replace_callback") {
+        return crate::stdlib_preg::call(vm, name, args);
+    }
+    if matches!(name, "settype" | "str_replace" | "str_ireplace") {
         return call_other(vm, name, args);
     }
     let first = args.first().cloned().unwrap_or(Value::Null);

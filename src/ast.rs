@@ -44,6 +44,8 @@ pub enum Expr {
     AssignRef(Box<Expr>, Box<Expr>),
     /// `...$args` inside a call or array literal
     Spread(Box<Expr>),
+    /// include (0) / include_once (1) / require (2) / require_once (3)
+    Include(u8, Box<Expr>),
     /// `name: expr` call argument
     NamedArg(String, Box<Expr>),
     /// `$$name` / `${expr}`
