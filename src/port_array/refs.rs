@@ -23,6 +23,10 @@ fn build(items: Vec<(Key, Value)>, renumber: bool) -> Value {
     Value::Array(Rc::new(a))
 }
 
+fn build_list(items: Vec<(Key, Value)>) -> Value {
+    Value::Array(Rc::new(PhpArray::from_list(items.into_iter().map(|(_, v)| v).collect())))
+}
+
 fn first_array(vm: &mut Vm<'_>, f: &str, args: &[Value]) -> R<Rc<PhpArray>> {
     match args.first().map(Value::deref) {
         Some(Value::Array(a)) => Ok(a),
@@ -58,7 +62,7 @@ fn do_sort(vm: &mut Vm<'_>, name: &str, args: &mut [Value]) -> R<Value> {
         let o = if by_key { cmp(&a.0.to_value(), &b.0.to_value()) } else { cmp(&a.1, &b.1) };
         Ok(if reverse { o.reverse() } else { o })
     })?;
-    args[0] = build(out, renumber);
+    args[0] = if renumber { build_list(out) } else { build(out, false) };
     Ok(Value::Bool(true))
 }
 
@@ -77,7 +81,7 @@ fn do_usort(vm: &mut Vm<'_>, name: &str, args: &mut [Value]) -> R<Value> {
         };
         Ok(n.cmp(&0))
     })?;
-    args[0] = build(out, name == "usort");
+    args[0] = if name == "usort" { build_list(out) } else { build(out, false) };
     Ok(Value::Bool(true))
 }
 

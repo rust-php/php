@@ -64,6 +64,13 @@ pub fn callback_error(v: &Value) -> String {
 }
 
 pub fn is_callable(vm: &mut Vm<'_>, v: &Value) -> bool {
+    if let Value::Array(a) = v.deref() {
+        if let (Some(Value::Object(o)), Some(_)) = (a.get(&Key::Int(0)).map(Value::deref), a.get(&Key::Int(1))) {
+            if o.class.find_method("__call").is_some() {
+                return true;
+            }
+        }
+    }
     matches!(vm.call_value(&Value::str("is_callable"), vec![v.deref()]), Ok(Value::Bool(true)))
 }
 

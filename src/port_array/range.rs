@@ -103,21 +103,13 @@ pub fn f_range(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
         if rank(st) < 2 || rank(et) < 2 {
             if rank(st) < 2 {
                 et = T::Long;
-                end_long = 0;
-                end_double = 0.0;
             } else {
                 st = T::Long;
-                start_long = 0;
-                start_double = 0.0;
             }
             goto_numeric = true;
         } else if is_step_double {
             st = T::Long;
             et = T::Long;
-            start_long = 0;
-            end_long = 0;
-            start_double = 0.0;
-            end_double = 0.0;
             goto_numeric = true;
         }
         if !goto_numeric {
