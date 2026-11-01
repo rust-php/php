@@ -33,6 +33,9 @@ pub(crate) fn need_arr(a: &[Value], i: usize, f: &str) -> Result<Rc<PhpArray>, S
 }
 
 pub fn constant(name: &str) -> Option<Value> {
+    if let Some(v) = crate::port_var::constant(name) {
+        return Some(v);
+    }
     Some(match name {
         "PHP_EOL" => s("\n"),
         "PHP_INT_MAX" => Value::Int(i64::MAX),
