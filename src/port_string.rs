@@ -28,6 +28,8 @@ mod mbenc;
 mod mb;
 #[path = "ps/scanf.rs"]
 mod scanf;
+#[path = "ps/numfmt.rs"]
+mod numfmt;
 #[path = "ps/fmt.rs"]
 mod fmt;
 #[path = "ps/consts.rs"]
@@ -46,6 +48,7 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     fmt::register(m);
     core1::register(m);
     core2::register(m);
+    numfmt::register(m);
     scanf::register(m);
     mb::register(m);
     html::register(m);
