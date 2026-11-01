@@ -9,7 +9,8 @@ type R<T> = Result<T, Flow>;
 pub fn ref_positions(name: &str) -> &'static [usize] {
     match name {
         "sort" | "rsort" | "usort" | "uasort" | "uksort" | "asort" | "arsort" | "ksort" | "krsort" | "shuffle" | "array_push" | "array_pop"
-        | "array_shift" | "array_unshift" | "array_splice" | "reset" | "end" | "next" | "prev" | "array_walk" | "natsort" | "natcasesort" => &[0],
+        | "array_shift" | "array_unshift" | "array_splice" | "reset" | "end" | "next" | "prev" | "array_walk" | "natsort" | "natcasesort" | "array_walk_recursive" => &[0],
+        "array_multisort" => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         "preg_match" | "preg_match_all" => &[2],
         "preg_replace" | "preg_replace_callback" => &[4],
         "str_replace" | "str_ireplace" => &[3],
@@ -78,6 +79,9 @@ pub fn call_ref(vm: &mut Vm<'_>, name: &str, args: &mut Vec<Value>) -> Option<R<
     }
     if matches!(name, "settype" | "str_replace" | "str_ireplace") {
         return call_other(vm, name, args);
+    }
+    if let Some(r) = crate::port_array::refs::call(vm, name, args) {
+        return Some(r);
     }
     let first = args.first().cloned().unwrap_or(Value::Null);
     let Some(items) = entries(&first) else {
