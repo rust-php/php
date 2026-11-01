@@ -79,6 +79,7 @@ pub enum Extra {
     None,
     Closure(ClosureData),
     Generator(Rc<RefCell<crate::vm::GenState>>),
+    Fiber(Rc<RefCell<crate::fiber::FiberState>>),
 }
 
 #[derive(Clone)]

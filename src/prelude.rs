@@ -44,6 +44,7 @@ const SIMPLE: &[(&str, &str)] = &[
     ("UnderflowException", "RuntimeException"),
     ("UnexpectedValueException", "RuntimeException"),
     ("JsonException", "Exception"),
+    ("FiberError", "Error"),
 ];
 
 pub fn source() -> String {
@@ -61,6 +62,7 @@ interface Throwable extends Stringable {}
 class stdClass {}
 final class Closure {}
 final class Generator implements Iterator {}
+final class Fiber {}
 interface BackedEnum extends UnitEnum {}
 ",
     );

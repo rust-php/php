@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod builtins;
 pub mod compiler;
+pub mod fiber;
 pub mod lexer;
 pub mod object;
 pub mod parser;
@@ -177,6 +178,22 @@ mod tests {
         t("class A { public int $n; } $a = new A; try { echo $a->n; } catch (Error $e) { echo $e->getMessage(); }", "Typed property A::$n must not be accessed before initialization");
         t("class P { public readonly int $x; function __construct() { $this->x = 1; } } $p = new P; try { $p->x = 2; } catch (Error $e) { echo $e->getMessage(); }", "Cannot modify readonly property P::$x");
         t("class T { public int $v = 0; } $t = new T; $t->v = '12'; var_dump($t->v); try { $t->v = 'x'; } catch (TypeError $e) { echo $e->getMessage(); }", "int(12)\nCannot assign string to property T::$v of type int");
+    }
+
+    #[test]
+    fn named_args_and_variable_variables() {
+        t("function f($a, $b = 2, $c = 3) { return \"$a-$b-$c\"; } echo f(1, c: 9), f(b: 5, a: 0);", "1-2-90-5-3");
+        t("class P { function __construct(public $x = 1, public $y = 2) {} } $p = new P(y: 7); echo $p->x, $p->y;", "17");
+        t("$n = 'v'; $$n = 5; echo $v, $$n; ${'w' . 'x'} = 2; echo $wx;", "552");
+        t("$a = 1; $b = 2; $r = compact('a', 'b'); echo count($r); extract(['q' => 8]); echo $q;", "28");
+        t("function g() { $z = 4; return get_defined_vars(); } echo g()['z'];", "4");
+    }
+
+    #[test]
+    fn fibers() {
+        t("$f = new Fiber(function($x) { $y = Fiber::suspend($x * 2); echo 'got ', $y, ';'; return 'done'; }); echo $f->start(5), ';'; $f->resume('r'); echo $f->getReturn(), $f->isTerminated() ? 'T' : 'F';", "10;got r;doneT");
+        t("function deep($n) { if ($n == 0) { return Fiber::suspend('bottom'); } return deep($n - 1); } $f = new Fiber(fn() => deep(5)); echo $f->start(); $f->resume(1); echo $f->isTerminated() ? 'T' : 'F';", "bottomT");
+        t("$f = new Fiber(function() { try { Fiber::suspend(1); } catch (Exception $e) { echo 'caught ', $e->getMessage(); } }); $f->start(); $f->throw(new Exception('x'));", "caught x");
     }
 
     #[test]

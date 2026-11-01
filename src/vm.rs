@@ -35,6 +35,8 @@ pub struct CallCtx {
 }
 
 pub(crate) struct Frame {
+    dyn_vars: HashMap<String, Value>,
+    undef_mask: u64,
     locals: Vec<Value>,
     st: Vec<Value>,
     pc: usize,
@@ -70,6 +72,7 @@ pub struct Vm<'p> {
     pub exception_handler: Option<Value>,
     pub error_handler: Option<Value>,
     pub shutdown: Vec<(Value, Vec<Value>)>,
+    pub fiber_stack: Vec<Value>,
     statics: HashMap<u32, Rc<RefCell<Value>>>,
     depth: usize,
 }
@@ -82,7 +85,7 @@ fn lc(s: &str) -> String {
 
 impl<'p> Vm<'p> {
     pub fn new(prog: &'p Program) -> Self {
-        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), statics: HashMap::new(), depth: 0 }
+        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), fiber_stack: Vec::new(), statics: HashMap::new(), depth: 0 }
     }
 
     pub fn run_main(&mut self) -> R<()> {
@@ -304,6 +307,9 @@ impl<'p> Vm<'p> {
     }
 
     pub fn instantiate(&mut self, class: &Rc<Class>, args: Vec<Value>) -> R<Value> {
+        if class.name == "Fiber" {
+            return Ok(crate::fiber::create(class.clone(), args.into_iter().next().unwrap_or(Value::Null)));
+        }
         if class.kind != ClassKind::Class || class.is_abstract {
             let what = match class.kind {
                 ClassKind::Interface => "interface",
@@ -482,6 +488,7 @@ impl<'p> Vm<'p> {
             locals[0] = t.clone();
         }
         let argc = args.len();
+        let mut undef_mask = 0u64;
         let mut it = args.into_iter();
         for i in 0..f.nparams {
             let by_ref = f.ref_params.get(i).copied().unwrap_or(false);
@@ -491,6 +498,11 @@ impl<'p> Vm<'p> {
                 break;
             }
             match it.next() {
+                Some(a) if is_undef(&a) => {
+                    if i < 64 {
+                        undef_mask |= 1 << i;
+                    }
+                }
                 Some(a) => locals[1 + i] = if by_ref { a } else { unref(a) },
                 None => break,
             }
@@ -506,7 +518,7 @@ impl<'p> Vm<'p> {
                 }
             }
         }
-        Frame { locals, st: Vec::with_capacity(16), pc: 0, argc, ctx }
+        Frame { dyn_vars: HashMap::new(), undef_mask, locals, st: Vec::with_capacity(16), pc: 0, argc, ctx }
     }
 
     fn exec(&mut self, f: &'p Func, args: Vec<Value>, ctx: CallCtx) -> R<Value> {
@@ -716,6 +728,76 @@ impl<'p> Vm<'p> {
                     let keys: Vec<Key> = ks.iter().map(Key::from_value).collect::<Result<_, _>>()?;
                     with_local_mut(&mut fr.locals, slot, |cur| unset_dim(cur, &keys));
                 }
+                Op::LoadVar => {
+                    let name = pop!().to_str();
+                    let v = match f.local_names.iter().position(|n| **n == *name) {
+                        Some(slot) => get_local(&fr.locals, slot as u16),
+                        None => fr.dyn_vars.get(&*name).cloned().unwrap_or(Value::Null),
+                    };
+                    fr.st.push(v);
+                }
+                Op::StoreVar => {
+                    let v = pop!();
+                    let name = pop!().to_str();
+                    match f.local_names.iter().position(|n| **n == *name) {
+                        Some(slot) => set_local(&mut fr.locals, slot as u16, v.clone()),
+                        None => {
+                            fr.dyn_vars.insert(name.to_string(), v.clone());
+                        }
+                    }
+                    fr.st.push(v);
+                }
+                Op::Compact(argc) => {
+                    let names = split_args!(argc);
+                    let mut out = PhpArray::new();
+                    let mut add = |n: &str, fr: &Frame| {
+                        let found = match f.local_names.iter().position(|x| x == n) {
+                            Some(slot) => Some(get_local(&fr.locals, slot as u16)),
+                            None => fr.dyn_vars.get(n).cloned(),
+                        };
+                        if let Some(v) = found.filter(|v| !matches!(v, Value::Null)) {
+                            out.set(Key::from_str(n), v);
+                        }
+                    };
+                    for n in &names {
+                        match n {
+                            Value::Array(a) => a.iter().for_each(|(_, x)| add(&x.to_str(), fr)),
+                            other => add(&other.to_str(), fr),
+                        }
+                    }
+                    fr.st.push(Value::Array(Rc::new(out)));
+                }
+                Op::Extract => {
+                    let src = pop!();
+                    let mut n = 0;
+                    if let Value::Array(a) = &src {
+                        for (k, v) in a.iter() {
+                            if let Key::Str(name) = k {
+                                match f.local_names.iter().position(|x| **x == **name) {
+                                    Some(slot) => set_local(&mut fr.locals, slot as u16, v.clone()),
+                                    None => {
+                                        fr.dyn_vars.insert(name.to_string(), v.clone());
+                                    }
+                                }
+                                n += 1;
+                            }
+                        }
+                    }
+                    fr.st.push(Value::Int(n));
+                }
+                Op::GetDefinedVars => {
+                    let mut out = PhpArray::new();
+                    for (slot, name) in f.local_names.iter().enumerate() {
+                        if name.starts_with('#') || name == "this" {
+                            continue;
+                        }
+                        let v = get_local(&fr.locals, slot as u16);
+                        if !matches!(v, Value::Null) {
+                            out.set(Key::from_str(name), v);
+                        }
+                    }
+                    fr.st.push(Value::Array(Rc::new(out)));
+                }
                 Op::UnsetPropDim(shape) => {
                     let n = prog.shapes[shape as usize].len();
                     let ks = split_args!(n);
@@ -856,7 +938,7 @@ impl<'p> Vm<'p> {
                     return Err(Flow::Fatal(m.to_string()));
                 }
                 Op::SkipIfArg(i, t) => {
-                    if fr.argc > i as usize {
+                    if fr.argc > i as usize && (i >= 64 || fr.undef_mask & (1 << i) == 0) {
                         fr.pc = t as usize;
                     }
                 }
@@ -952,8 +1034,9 @@ impl<'p> Vm<'p> {
                 }
                 Op::CallSpread(kind, k, forward) => {
                     let list = pop!();
+                    let target = self.spread_target(fr, kind, k);
                     let args: Vec<Value> = match &list {
-                        Value::Array(a) => a.iter().map(|(_, v)| v.clone()).collect(),
+                        Value::Array(a) => self.arrange_args(target, a)?,
                         _ => vec![],
                     };
                     let r = match kind {
@@ -1171,7 +1254,7 @@ impl<'p> Vm<'p> {
                     let extra = match &*o.extra.borrow() {
                         Extra::None => Extra::None,
                         Extra::Closure(c) => Extra::Closure(c.clone()),
-                        Extra::Generator(_) => return self.throw_error("Error", "Trying to clone an uncloneable object of class Generator"),
+                        Extra::Generator(_) | Extra::Fiber(_) => return self.throw_error("Error", "Trying to clone an uncloneable object"),
                     };
                     let copy = Value::Object(Obj::new(o.class.clone(), o.props.borrow().clone(), extra));
                     if let Some(m) = o.class.find_method("__clone") {
@@ -1477,6 +1560,70 @@ impl<'p> Vm<'p> {
         }
     }
 
+    /// The user function a spread/named call will invoke, if it can be determined from the stack.
+    fn spread_target(&self, fr: &Frame, kind: u8, k: u32) -> Option<usize> {
+        let n = fr.st.len();
+        match kind {
+            0 => {
+                let Value::Str(name) = &self.prog.consts[k as usize] else { return None };
+                self.prog.func_index.get(&**name).copied()
+            }
+            1 => match fr.st.last()? {
+                Value::Object(o) => match &*o.extra.borrow() {
+                    Extra::Closure(c) => Some(c.func),
+                    _ => o.class.find_method("__invoke").map(|m| m.func),
+                },
+                Value::Str(s) => self.prog.func_index.get(&lc(s)).copied(),
+                _ => None,
+            },
+            2 => match fr.st.get(n.checked_sub(2)?)? {
+                Value::Object(o) => o.class.find_method(&lc(&fr.st.last()?.to_str())).map(|m| m.func),
+                _ => None,
+            },
+            3 => {
+                let class = self.class_of(fr.st.get(n.checked_sub(2)?)?).ok()?;
+                class.find_method(&lc(&fr.st.last()?.to_str())).map(|m| m.func)
+            }
+            _ => {
+                let class = self.class_of(fr.st.last()?).ok()?;
+                class.find_method("__construct").map(|m| m.func)
+            }
+        }
+    }
+
+    /// Turn an argument array (positional and `name => value` entries) into a positional argument list.
+    fn arrange_args(&mut self, target: Option<usize>, list: &PhpArray) -> R<Vec<Value>> {
+        let mut args: Vec<Value> = Vec::new();
+        let mut named: Vec<(String, Value)> = Vec::new();
+        for (k, v) in list.iter() {
+            match k {
+                Key::Int(_) if named.is_empty() => args.push(v.clone()),
+                Key::Int(_) => return self.throw_error("Error", "Cannot use positional argument after named argument"),
+                Key::Str(n) => named.push((n.to_string(), v.clone())),
+            }
+        }
+        for (name, v) in named {
+            let Some(fi) = target else {
+                args.push(v);
+                continue;
+            };
+            let f = &self.prog.funcs[fi];
+            match f.param_names.iter().position(|p| *p == name) {
+                Some(i) => {
+                    while args.len() <= i {
+                        args.push(undef());
+                    }
+                    if !is_undef(&args[i]) {
+                        return self.throw_error("Error", &format!("Named parameter ${name} overwrites previous argument"));
+                    }
+                    args[i] = v;
+                }
+                None => return self.throw_error("Error", &format!("Unknown named parameter ${name}")),
+            }
+        }
+        Ok(args)
+    }
+
     /// Elements of an array or Traversable, for `...$spread`.
     fn spread_items(&mut self, src: &Value) -> R<Vec<(Key, Value)>> {
         match src {
@@ -1505,6 +1652,13 @@ impl<'p> Vm<'p> {
             return self.throw_error("Error", &format!("Call to a member function {}() on {}", name, obj.type_name()));
         };
         let lname = lc(name);
+        let fiber = match &*o.extra.borrow() {
+            Extra::Fiber(f) => Some(f.clone()),
+            _ => None,
+        };
+        if let Some(f) = fiber {
+            return crate::fiber::method(self, obj, &f, &lname, args);
+        }
         let gen = match &*o.extra.borrow() {
             Extra::Generator(g) => Some(g.clone()),
             _ => None,
@@ -1560,6 +1714,11 @@ impl<'p> Vm<'p> {
 
     fn call_static_op(&mut self, fr: &Frame, cv: &Value, name: &str, args: Vec<Value>, forward: bool) -> R<Value> {
         if let Value::Str(c) = cv {
+            if c.eq_ignore_ascii_case("fiber") {
+                if let Some(r) = crate::fiber::static_call(self, &lc(name), args.clone()) {
+                    return r;
+                }
+            }
             if c.eq_ignore_ascii_case("closure") {
                 match lc(name).as_str() {
                     "fromcallable" => return Ok(args.into_iter().next().unwrap_or(Value::Null)),
@@ -1854,4 +2013,13 @@ fn type_name_of(v: &Value) -> String {
         Value::Object(o) => o.class.name.clone(),
         other => other.type_name().to_string(),
     }
+}
+
+/// Marker for a skipped argument in a named-argument call (so the parameter default applies).
+fn undef() -> Value {
+    Value::Str("\u{0}undef".into())
+}
+
+fn is_undef(v: &Value) -> bool {
+    matches!(v, Value::Str(s) if &**s == "\u{0}undef")
 }

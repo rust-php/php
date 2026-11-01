@@ -44,6 +44,10 @@ pub enum Expr {
     AssignRef(Box<Expr>, Box<Expr>),
     /// `...$args` inside a call or array literal
     Spread(Box<Expr>),
+    /// `name: expr` call argument
+    NamedArg(String, Box<Expr>),
+    /// `$$name` / `${expr}`
+    VarVar(Box<Expr>),
     /// Skipped slot in `[, $b] = ...`
     Hole,
     /// Destructuring pattern: `list($a, 'k' => $b)` / `[$a, [$b]]` as an assignment target.

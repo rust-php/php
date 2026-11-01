@@ -10,3 +10,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "php"
 path = "src/main.rs"
+
+[dependencies]
+corosensei = "0.3.4"

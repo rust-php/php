@@ -27,7 +27,7 @@ fn boxed(e: Expr) -> Box<Expr> {
 }
 
 fn is_lvalue(e: &Expr) -> bool {
-    matches!(e, Expr::Var(_) | Expr::Index(..) | Expr::Prop { .. } | Expr::StaticProp(..))
+    matches!(e, Expr::Var(_) | Expr::Index(..) | Expr::Prop { .. } | Expr::StaticProp(..) | Expr::VarVar(_))
 }
 
 fn assign_op(o: &str) -> Option<&'static str> {
@@ -132,6 +132,10 @@ impl Parser {
         while !self.is_op(end) {
             if self.eat_op("...") {
                 v.push(Expr::Spread(boxed(self.expr(0)?)));
+            } else if matches!((self.peek(), self.peek_at(1)), (Tok::Ident(_), Tok::Op(":"))) {
+                let Tok::Ident(n) = self.next() else { unreachable!() };
+                self.pos += 1;
+                v.push(Expr::NamedArg(n, boxed(self.expr(0)?)));
             } else {
                 v.push(self.expr(0)?);
             }
@@ -1067,6 +1071,23 @@ impl Parser {
                 Ok(e)
             }
             Tok::Op("[") => self.array_lit("]"),
+            Tok::Op("$") => {
+                let inner = match self.peek().clone() {
+                    Tok::Var(n) => {
+                        self.pos += 1;
+                        Expr::Var(n)
+                    }
+                    Tok::Op("$") => self.primary()?,
+                    Tok::Op("{") => {
+                        self.pos += 1;
+                        let e = self.expr(0)?;
+                        self.expect_op("}")?;
+                        e
+                    }
+                    t => return Err(format!("syntax error, unexpected {t:?} after $")),
+                };
+                Ok(Expr::VarVar(boxed(inner)))
+            }
             Tok::Ident(w) => {
                 if w.eq_ignore_ascii_case("array") && self.is_op("(") {
                     self.pos += 1;

@@ -69,6 +69,11 @@ pub enum Op {
     GetStatic,
     AssignStatic,
     AssignStaticDim(u32),
+    LoadVar,
+    StoreVar,
+    Compact(u8),
+    Extract,
+    GetDefinedVars,
     UnsetPropDim(u32),
     UnsetStaticDim(u32),
     InstanceOf,
@@ -105,6 +110,7 @@ pub struct Func {
     pub variadic: bool,
     pub is_generator: bool,
     pub param_names: Vec<String>,
+    pub local_names: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -190,7 +196,8 @@ pub fn compile(stmts: &[Stmt]) -> R<Program> {
     fc.code.push(Op::Halt);
     let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
     let main_locals = fc.locals.clone();
-    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false, param_names: vec![] };
+    let main_names = names_by_slot(&main_locals);
+    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false, param_names: vec![], local_names: main_names };
     prog.main_locals = main_locals;
     Ok(prog)
 }
@@ -218,7 +225,7 @@ fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
             expr_vars(b, out);
         }
         Expr::IncDec { target, .. } => expr_vars(target, out),
-        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) | Expr::Spread(a) | Expr::YieldFrom(a) => expr_vars(a, out),
+        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) | Expr::Spread(a) | Expr::YieldFrom(a) | Expr::VarVar(a) | Expr::NamedArg(_, a) => expr_vars(a, out),
         Expr::Ternary(a, b, c) => {
             expr_vars(a, out);
             if let Some(b) = b {
@@ -760,6 +767,7 @@ impl Fc<'_> {
         sub.push_const(Value::Null);
         sub.emit(Op::Ret);
         let (code, nlocals, handlers, is_generator) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers), sub.has_yield);
+        let local_names = names_by_slot(&sub.locals);
         let idx = self.prog.funcs.len();
         self.prog.funcs.push(Func {
             name: f.name.clone(),
@@ -772,6 +780,7 @@ impl Fc<'_> {
             variadic: f.params.last().is_some_and(|p| p.variadic),
             is_generator,
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+            local_names,
         });
         Ok(idx)
     }
@@ -895,6 +904,11 @@ impl Fc<'_> {
                 Expr::Spread(inner) => {
                     self.expr(inner)?;
                     self.emit(Op::ArrSpread);
+                }
+                Expr::NamedArg(name, value) => {
+                    self.push_const(Value::str(name));
+                    self.expr(value)?;
+                    self.emit(Op::ArrSet);
                 }
                 other => {
                     self.expr(other)?;
@@ -1052,6 +1066,23 @@ impl Fc<'_> {
                     self.emit(Op::CallSpread(0, k, false));
                     return Ok(());
                 }
+                match lname.as_str() {
+                    "compact" => {
+                        let n = self.args(args)?;
+                        self.emit(Op::Compact(n));
+                        return Ok(());
+                    }
+                    "extract" => {
+                        self.args(args)?;
+                        self.emit(Op::Extract);
+                        return Ok(());
+                    }
+                    "get_defined_vars" => {
+                        self.emit(Op::GetDefinedVars);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 let refs = builtins::ref_positions(&lname);
                 if !refs.is_empty() {
                     return self.call_ref_builtin(k, args, refs);
@@ -1071,7 +1102,11 @@ impl Fc<'_> {
                 let site = self.site(args);
                 self.emit(Op::CallValue(n, site));
             }
-            Expr::Spread(_) => return Err("Cannot use spread operator here".into()),
+            Expr::Spread(_) | Expr::NamedArg(..) => return Err("Cannot use spread operator here".into()),
+            Expr::VarVar(inner) => {
+                self.expr(inner)?;
+                self.emit(Op::LoadVar);
+            }
             Expr::Hole | Expr::List(_) => return Err("Cannot use list() outside of an assignment".into()),
             Expr::Yield(k, v) => {
                 self.has_yield = true;
@@ -1294,6 +1329,12 @@ impl Fc<'_> {
 
     /// Compile an assignment whose value is produced by `rhs`; leaves the assigned value on the stack.
     fn assign(&mut self, target: &Expr, rhs: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
+        if let Expr::VarVar(inner) = target {
+            self.expr(inner)?;
+            rhs(self)?;
+            self.emit(Op::StoreVar);
+            return Ok(());
+        }
         if let Expr::List(items) = target {
             rhs(self)?;
             let name = format!("#l{}", self.locals.len());
@@ -1373,7 +1414,15 @@ impl Fc<'_> {
 }
 
 fn has_spread(args: &[Expr]) -> bool {
-    args.iter().any(|a| matches!(a, Expr::Spread(_)))
+    args.iter().any(|a| matches!(a, Expr::Spread(_) | Expr::NamedArg(..)))
+}
+
+fn names_by_slot(locals: &HashMap<String, u16>) -> Vec<String> {
+    let mut v = vec![String::new(); locals.len()];
+    for (n, s) in locals {
+        v[*s as usize] = n.clone();
+    }
+    v
 }
 
 enum Base<'a> {
