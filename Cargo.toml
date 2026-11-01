@@ -1,0 +1,12 @@
+[package]
+name = "php"
+version = "0.1.0"
+edition = "2021"
+license = "PHP-3.01"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "php"
+path = "src/main.rs"
