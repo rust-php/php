@@ -8,6 +8,7 @@ use std::collections::HashMap;
 mod dump;
 mod json;
 mod ser;
+mod types;
 
 type R<T> = Result<T, Flow>;
 
@@ -70,6 +71,10 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     m.insert("var_dump", var_dump);
     m.insert("print_r", print_r);
     m.insert("var_export", var_export);
+    m.insert("intval", types::intval);
+    m.insert("is_scalar", types::is_scalar);
+    m.insert("get_debug_type", types::get_debug_type);
+    m.insert("gettype", types::gettype);
     m.insert("serialize", ser::serialize);
     m.insert("unserialize", ser::unserialize);
     m.insert("json_encode", json::json_encode);

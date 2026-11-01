@@ -240,6 +240,7 @@ fn ser_object(vm: &mut Vm<'_>, s: &mut Ser, v: &Value, o: &Rc<Obj>) -> R<()> {
                 let (vis, cls) = o.class.prop_vis(n).map(|(v, c)| (v, c.to_string())).unwrap_or((0, String::new()));
                 (Key::Str(mangle(vis, &cls, n).as_str().into()), x.clone())
             }
+            Key::Int(i) => (Key::Str(i.to_string().as_str().into()), x.clone()),
             _ => (k.clone(), x.clone()),
         })
         .collect();
@@ -456,7 +457,32 @@ impl<'a> Unser<'a> {
                 t!(self.expect(b';'));
                 Ok(Ok(simple(self, Value::Str(s.as_str().into()))))
             }
-            b'S' => Ok(Err(Fail)),
+            b'S' => {
+                self.pos += 2;
+                let len = t!(self.read_int(false)) as usize;
+                t!(self.expect(b':'));
+                t!(self.expect(b'"'));
+                let mut bytes: Vec<u8> = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let Some(c) = self.peek() else { return Ok(Err(Fail)) };
+                    if c == b'\\' {
+                        let h = self.b.get(self.pos + 1..self.pos + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+                        let Some(h) = h else { return Ok(Err(Fail)) };
+                        bytes.push(h);
+                        self.pos += 3;
+                    } else {
+                        bytes.push(c);
+                        self.pos += 1;
+                    }
+                }
+                t!(self.expect(b'"'));
+                t!(self.expect(b';'));
+                let st = match String::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+                };
+                Ok(Ok(simple(self, Value::Str(st.as_str().into()))))
+            }
             b'a' => {
                 self.pos += 2;
                 let n = t!(self.read_int(false));
@@ -684,7 +710,7 @@ fn unmangle(k: &Key) -> Key {
     if let Key::Str(s) = k {
         if let Some(rest) = s.strip_prefix('\0') {
             if let Some(p) = rest.find('\0') {
-                return Key::Str(rest[p + 1..].into());
+                return Key::from_str(&rest[p + 1..]);
             }
         }
     }
@@ -749,10 +775,6 @@ pub fn unserialize(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
                 let mut props = o.props.borrow_mut();
                 for (k, c) in items {
                     let key = unmangle(k);
-                    let key = match &key {
-                        Key::Int(i) => Key::Str(i.to_string().as_str().into()),
-                        k => k.clone(),
-                    };
                     props.set(key, finalize(c));
                 }
                 drop(props);

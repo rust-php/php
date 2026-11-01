@@ -61,13 +61,31 @@ pub fn var_dump(vm: &mut Vm<'_>, v: &Value, level: usize, stack: &mut Vec<usize>
     }
     let mut is_ref = false;
     let mut cur = v.clone();
+    let mut cell = None;
     while let Value::Ref(r) = &cur {
-        if Rc::strong_count(r) > 1 {
+        if Rc::strong_count(r) > 2 {
             is_ref = true;
         }
+        let p = Rc::as_ptr(r) as usize;
+        if stack.contains(&p) {
+            out.push_str("*RECURSION*\n");
+            return Ok(());
+        }
+        cell = Some(p);
         let inner = r.borrow().clone();
         cur = inner;
     }
+    if let Some(p) = cell {
+        stack.push(p);
+        let r = var_dump_inner(vm, &cur, level, stack, out, is_ref);
+        stack.pop();
+        return r;
+    }
+    var_dump_inner(vm, &cur, level, stack, out, is_ref)
+}
+
+fn var_dump_inner(vm: &mut Vm<'_>, cur: &Value, level: usize, stack: &mut Vec<usize>, out: &mut String, is_ref: bool) -> R<()> {
+    let cur = cur.clone();
     let common = if is_ref { "&" } else { "" };
     match &cur {
         Value::Bool(b) => out.push_str(&format!("{common}bool({b})\n")),
@@ -115,7 +133,7 @@ pub fn var_dump(vm: &mut Vm<'_>, v: &Value, level: usize, stack: &mut Vec<usize>
             }
             for (k, x) in &props {
                 match k {
-                    Key::Int(i) => out.push_str(&format!("{}[{i}]=>\n", " ".repeat(level + 1))),
+                    Key::Int(i) => out.push_str(&format!("{}[\"{i}\"]=>\n", " ".repeat(level + 1))),
                     Key::Str(t) => {
                         let (name, vis, cls) = prop_label(o, t);
                         let lab = match vis {
@@ -147,8 +165,16 @@ pub fn var_dump(vm: &mut Vm<'_>, v: &Value, level: usize, stack: &mut Vec<usize>
 pub fn print_r(vm: &mut Vm<'_>, v: &Value, indent: usize, stack: &mut Vec<usize>, out: &mut String) -> R<()> {
     match v {
         Value::Ref(r) => {
+            let p = Rc::as_ptr(r) as usize;
+            if stack.contains(&p) {
+                out.push_str("Array\n *RECURSION*");
+                return Ok(());
+            }
+            stack.push(p);
             let inner = r.borrow().clone();
-            print_r(vm, &inner, indent, stack, out)
+            let res = print_r(vm, &inner, indent, stack, out);
+            stack.pop();
+            res
         }
         Value::Array(a) => {
             out.push_str("Array\n");
@@ -258,8 +284,17 @@ fn export_double(f: f64) -> String {
 pub fn var_export(vm: &mut Vm<'_>, v: &Value, level: usize, stack: &mut Vec<usize>, out: &mut String) -> R<()> {
     match v {
         Value::Ref(r) => {
+            let p = Rc::as_ptr(r) as usize;
+            if stack.contains(&p) {
+                out.push_str("NULL");
+                crate::port_var::diag(vm, "Warning", "var_export does not handle circular references");
+                return Ok(());
+            }
+            stack.push(p);
             let inner = r.borrow().clone();
-            var_export(vm, &inner, level, stack, out)
+            let res = var_export(vm, &inner, level, stack, out);
+            stack.pop();
+            res
         }
         Value::Bool(b) => {
             out.push_str(if *b { "true" } else { "false" });

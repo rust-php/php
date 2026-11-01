@@ -349,8 +349,17 @@ fn encode_zval(vm: &mut Vm<'_>, buf: &mut String, val: &Value, o: i64, e: &mut E
         }
         Value::Array(_) => return encode_array(vm, buf, val, o, e),
         Value::Ref(r) => {
+            let p = Rc::as_ptr(r) as usize;
+            if e.rec.contains(&p) {
+                e.error = E_RECURSION;
+                buf.push_str("null");
+                return Ok(false);
+            }
+            e.rec.push(p);
             let inner = r.borrow().clone();
-            return encode_zval(vm, buf, &inner, o, e);
+            let res = encode_zval(vm, buf, &inner, o, e);
+            e.rec.pop();
+            return res;
         }
         Value::Resource(_) => {
             e.error = E_UNSUPPORTED_TYPE;
@@ -702,7 +711,7 @@ impl<'a> Parser<'a> {
                     } else if self.assoc {
                         props.set(Key::from_str(&key), v);
                     } else {
-                        props.set(Key::Str(key.as_str().into()), v);
+                        props.set(Key::from_str(&key), v);
                     }
                     if first {
                         first = false;
