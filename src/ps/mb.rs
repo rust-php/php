@@ -95,6 +95,12 @@ fn mb_substr(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     let mut from = p_int(vm, "mb_substr", &a, 1, "start")?;
     let len = p_int_null(vm, "mb_substr", &a, 2, "length")?;
     get_enc(vm, "mb_substr", &a, 3)?;
+    if from == i64::MIN {
+        return ve(vm, "mb_substr", 2, "start", &format!("must be between {} and {}", i64::MIN + 1, i64::MAX));
+    }
+    if len == Some(i64::MIN) {
+        return ve(vm, "mb_substr", 3, "length", &format!("must be between {} and {}", i64::MIN + 1, i64::MAX));
+    }
     let n = s.chars().count() as i64;
     let mut l = len.unwrap_or(n);
     if from < 0 {

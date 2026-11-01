@@ -292,21 +292,26 @@ fn implode_impl(vm: &mut Vm<'_>, glue: &str, arr: &PhpArray) -> R<String> {
 
 fn implode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "implode", &a, 1, 2)?;
-    let (glue, arr): (Rc<str>, Rc<PhpArray>) = if a.len() == 1 {
-        match a[0].deref() {
-            Value::Array(x) => ("".into(), x),
-            _ => return vm.throw_error("TypeError", "implode(): Argument #1 ($array) must be of type array, string given"),
-        }
-    } else {
-        match (a[0].deref(), a[1].deref()) {
-            (Value::Array(x), Value::Null) => ("".into(), x),
-            (Value::Array(x), g @ Value::Str(_)) => (g.to_str(), x),
-            (g, Value::Array(x)) if !matches!(g, Value::Array(_)) => (p_str(vm, "implode", &a, 0, "separator")?, x),
-            (Value::Array(_), _) => return vm.throw_error("TypeError", "implode(): Argument #1 ($array) must be of type ?array, string given"),
-            (_, other) => {
-                let _ = other;
-                return vm.throw_error("TypeError", "implode(): Argument #2 ($array) must be of type ?array, string given");
+    let a1 = a[0].deref();
+    let a2 = a.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+    let pieces = match &a2 {
+        Value::Array(x) => Some(x.clone()),
+        Value::Null => None,
+        _ => return vm.throw_error("TypeError", &format!("implode(): Argument #2 ($array) must be of type ?array, {} given", zname(&a2))),
+    };
+    let (glue, arr): (Rc<str>, Rc<PhpArray>) = match pieces {
+        None => match &a1 {
+            Value::Array(x) => ("".into(), x.clone()),
+            Value::Str(_) => {
+                return vm.throw_error("TypeError", "implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given");
             }
+            _ => return vm.throw_error("TypeError", &format!("implode(): Argument #1 ($array) must be of type array|string, {} given", zname(&a1))),
+        },
+        Some(x) => {
+            if matches!(a1, Value::Array(_)) {
+                return vm.throw_error("TypeError", "implode(): Argument #1 ($separator) must be of type string, array given");
+            }
+            (p_str(vm, "implode", &a, 0, "separator")?, x)
         }
     };
     Ok(vstr(&implode_impl(vm, &glue, &arr)?))
