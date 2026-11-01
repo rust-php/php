@@ -43,6 +43,10 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable {
     public function offsetUnset($o): void { unset($this->__a[$o]); }
     public function append($v) { $this->__a[] = $v; }
     public function getArrayCopy() { return $this->__a; }
+    public function uasort($cb) { uasort($this->__a, $cb); return true; }
+    public function uksort($cb) { uksort($this->__a, $cb); return true; }
+    public function asort($f = 0) { asort($this->__a, $f); return true; }
+    public function ksort($f = 0) { ksort($this->__a, $f); return true; }
 }
 
 class IteratorIterator implements OuterIterator {
@@ -84,6 +88,7 @@ class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess {
     protected $__mode = 0;
     private $__i = 0;
     public function push($v) { $this->__d[] = $v; }
+    public function add($index, $v) { array_splice($this->__d, $index, 0, [$v]); }
     public function pop() { if (!$this->__d) throw new RuntimeException("Can't pop from an empty datastructure"); return array_pop($this->__d); }
     public function shift() { if (!$this->__d) throw new RuntimeException("Can't shift from an empty datastructure"); return array_shift($this->__d); }
     public function unshift($v) { array_unshift($this->__d, $v); }
@@ -135,6 +140,7 @@ class SplObjectStorage implements Countable, Iterator, ArrayAccess {
 class SplFixedArray implements ArrayAccess, Countable, IteratorAggregate {
     private $__d = [];
     private $__n = 0;
+    public static function fromArray($array, $preserveKeys = true) { $f = new SplFixedArray(count($array)); $i = 0; foreach ($array as $k => $v) { $f[$preserveKeys ? $k : $i] = $v; $i++; } return $f; }
     public function __construct($size = 0) { $this->__n = $size; $this->__d = $size > 0 ? array_fill(0, $size, null) : []; }
     public function getSize() { return $this->__n; }
     public function setSize($n) { for ($i = $this->__n; $i < $n; $i++) $this->__d[$i] = null; for ($i = $n; $i < $this->__n; $i++) unset($this->__d[$i]); $this->__n = $n; }
@@ -178,4 +184,159 @@ class SplPriorityQueue implements Iterator, Countable {
     public function current(): mixed { return $this->__h[0][0] ?? null; }
     public function key(): mixed { return count($this->__h) - 1; }
     public function next(): void { array_shift($this->__h); }
+}
+
+interface RecursiveIterator2 {}
+
+class RecursiveArrayIterator extends ArrayIterator implements RecursiveIterator {
+    public function hasChildren(): bool { $c = $this->current(); return is_array($c) || is_object($c); }
+    public function getChildren(): ?RecursiveArrayIterator { return new RecursiveArrayIterator($this->current()); }
+}
+
+class RecursiveIteratorIterator implements OuterIterator {
+    const LEAVES_ONLY = 0;
+    const SELF_FIRST = 1;
+    const CHILD_FIRST = 2;
+    private $__stack = [];
+    private $__mode;
+    private $__root;
+    private $__pending = [];
+    public function __construct($iterator, $mode = 0, $flags = 0) {
+        while ($iterator instanceof IteratorAggregate) { $iterator = $iterator->getIterator(); }
+        $this->__root = $iterator;
+        $this->__mode = $mode;
+    }
+    private function __walk($it, $depth) {
+        for ($it->rewind(); $it->valid(); $it->next()) {
+            $key = $it->key(); $val = $it->current();
+            $has = $it->hasChildren();
+            if ($has) {
+                if ($this->__mode == self::SELF_FIRST) { $this->__pending[] = [$key, $val, $depth]; }
+                $this->__walk($it->getChildren(), $depth + 1);
+                if ($this->__mode == self::CHILD_FIRST) { $this->__pending[] = [$key, $val, $depth]; }
+            } else {
+                $this->__pending[] = [$key, $val, $depth];
+            }
+        }
+    }
+    public function rewind(): void { $this->__pending = []; $this->__walk($this->__root, 0); $this->__i = 0; }
+    private $__i = 0;
+    public function valid(): bool { return $this->__i < count($this->__pending); }
+    public function current(): mixed { return $this->__pending[$this->__i][1] ?? null; }
+    public function key(): mixed { return $this->__pending[$this->__i][0] ?? null; }
+    public function next(): void { $this->__i++; }
+    public function getDepth() { return $this->__pending[$this->__i][2] ?? 0; }
+    public function getInnerIterator() { return $this->__root; }
+}
+
+class AppendIterator extends IteratorIterator {
+    private $__its = [];
+    private $__idx = 0;
+    public function __construct() { }
+    public function append(Iterator $it) { $this->__its[] = $it; if (count($this->__its) == 1) { $this->__idx = 0; $it->rewind(); } }
+    public function rewind(): void { $this->__idx = 0; if ($this->__its) { $this->__its[0]->rewind(); $this->__skipEmpty(); } }
+    private function __skipEmpty() { while ($this->__idx < count($this->__its) && !$this->__its[$this->__idx]->valid()) { $this->__idx++; if ($this->__idx < count($this->__its)) { $this->__its[$this->__idx]->rewind(); } } }
+    public function valid(): bool { return $this->__idx < count($this->__its) && $this->__its[$this->__idx]->valid(); }
+    public function current(): mixed { return $this->valid() ? $this->__its[$this->__idx]->current() : null; }
+    public function key(): mixed { return $this->valid() ? $this->__its[$this->__idx]->key() : null; }
+    public function next(): void { if ($this->__idx < count($this->__its)) { $this->__its[$this->__idx]->next(); $this->__skipEmpty(); } }
+    public function getIteratorIndex() { return $this->__idx; }
+}
+
+class RegexIterator extends FilterIterator2 {
+    const MATCH = 0;
+    const GET_MATCH = 1;
+    private $__re;
+    public function __construct($iterator, string $pattern, int $mode = 0) { parent::__construct($iterator); $this->__re = $pattern; }
+    public function accept(): bool { return (bool)preg_match($this->__re, (string)$this->__it->current()); }
+}
+
+abstract class FilterIterator2 extends IteratorIterator {
+    abstract public function accept(): bool;
+    public function rewind(): void { $this->__it->rewind(); $this->__skip(); }
+    public function next(): void { $this->__it->next(); $this->__skip(); }
+    private function __skip() { while ($this->__it->valid() && !$this->accept()) { $this->__it->next(); } }
+}
+
+class CachingIterator extends IteratorIterator {
+    const CALL_TOSTRING = 1;
+    private $__cur = null; private $__key = null; private $__has = false;
+    public function rewind(): void { $this->__it->rewind(); $this->__fetch(); }
+    private function __fetch() { $this->__has = $this->__it->valid(); if ($this->__has) { $this->__cur = $this->__it->current(); $this->__key = $this->__it->key(); $this->__it->next(); } }
+    public function next(): void { $this->__fetch(); }
+    public function valid(): bool { return $this->__has; }
+    public function current(): mixed { return $this->__cur; }
+    public function key(): mixed { return $this->__key; }
+    public function hasNext() { return $this->__it->valid(); }
+}
+
+class SplFileInfo implements Stringable {
+    private $__path;
+    public function __construct(string $filename) { $this->__path = $filename; }
+    public function getFilename() { return basename($this->__path); }
+    public function getPathname() { return $this->__path; }
+    public function getPath() { $d = dirname($this->__path); return $d === '.' && !str_contains($this->__path, '/') ? '' : $d; }
+    public function getExtension() { return pathinfo($this->__path, PATHINFO_EXTENSION); }
+    public function getBasename($suffix = '') { return basename($this->__path, $suffix); }
+    public function getSize() { return filesize($this->__path); }
+    public function getMTime() { return filemtime($this->__path); }
+    public function isFile() { return is_file($this->__path); }
+    public function isDir() { return is_dir($this->__path); }
+    public function isReadable() { return is_readable($this->__path); }
+    public function isWritable() { return is_writable($this->__path); }
+    public function getRealPath() { return realpath($this->__path); }
+    public function __toString(): string { return $this->__path; }
+}
+
+class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIterator {
+    const DROP_NEW_LINE = 1;
+    const READ_AHEAD = 2;
+    const SKIP_EMPTY = 4;
+    const READ_CSV = 8;
+    private $__h;
+    private $__line = false;
+    private $__n = 0;
+    private $__flags = 0;
+    public function __construct(string $filename, string $mode = 'r') {
+        parent::__construct($filename);
+        $h = @fopen($filename, $mode);
+        if ($h === false) { throw new RuntimeException("SplFileObject::__construct($filename): Failed to open stream: No such file or directory"); }
+        $this->__h = $h;
+    }
+    public function setFlags(int $flags) { $this->__flags = $flags; }
+    public function getFlags() { return $this->__flags; }
+    public function fgets(): string { $l = fgets($this->__h); return $l === false ? '' : $l; }
+    public function fwrite(string $data, int $length = 0) { return fwrite($this->__h, $length > 0 ? substr($data, 0, $length) : $data); }
+    public function fread(int $length) { return fread($this->__h, $length); }
+    public function fgetcsv(string $separator = ',', string $enclosure = '"', string $escape = '\\') { return fgetcsv($this->__h, null, $separator, $enclosure); }
+    public function eof() { return feof($this->__h); }
+    public function ftell() { return ftell($this->__h); }
+    public function fseek(int $offset, int $whence = SEEK_SET) { return fseek($this->__h, $offset, $whence); }
+    public function rewind(): void { rewind($this->__h); $this->__n = 0; $this->__read(); }
+    private function __read() {
+        $l = fgets($this->__h);
+        if ($l === false) { $this->__line = false; return; }
+        if ($this->__flags & self::DROP_NEW_LINE) { $l = rtrim($l, "\r\n"); }
+        $this->__line = $l;
+    }
+    public function valid(): bool { return $this->__line !== false || !feof($this->__h); }
+    public function current(): mixed { return $this->__line === false ? '' : $this->__line; }
+    public function key(): mixed { return $this->__n; }
+    public function next(): void { $this->__n++; $this->__read(); }
+    public function seek(int $line) { $this->rewind(); for ($i = 0; $i < $line && $this->valid(); $i++) { $this->next(); } }
+    public function hasChildren(): bool { return false; }
+    public function getChildren(): ?RecursiveIterator { return null; }
+}
+
+class SplTempFileObject extends SplFileObject {
+    public function __construct(int $maxMemory = 2097152) { $this->__h2 = fopen('php://memory', 'w+'); }
+    private $__h2;
+}
+
+class RecursiveDirectoryIterator extends ArrayIterator implements RecursiveIterator {
+    private $__dir;
+    public function __construct(string $directory, int $flags = 0) { $this->__dir = $directory; parent::__construct(array_values(array_diff(scandir($directory), ['.', '..']))); }
+    public function hasChildren(): bool { return is_dir($this->__dir . '/' . $this->current()); }
+    public function getChildren(): RecursiveDirectoryIterator { return new RecursiveDirectoryIterator($this->__dir . '/' . $this->current()); }
+    public function getFilename() { return $this->current(); }
 }
