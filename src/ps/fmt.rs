@@ -418,7 +418,10 @@ pub fn formatted_print(vm: &mut Vm<'_>, format: &str, args: &[Value], nb_additio
         let mut sp = Spec { out: &mut out };
         match spec {
             b's' => {
-                let s = tmp.to_str();
+                if let Value::Array(_) = tmp {
+                    warn(vm, "Array to string conversion");
+                }
+                let s = vm.to_string_val(&tmp)?;
                 sp.append_string(s.as_bytes(), w, pr, padding, alignment, false, expprec, false);
             }
             b'd' => sp.append_int(tmp.to_int(), w, padding, alignment, always_sign),
@@ -481,8 +484,17 @@ fn vprintf(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     Ok(Value::Int(s.len() as i64))
 }
 
+fn stream_check(vm: &mut Vm<'_>, f: &str, a: &[Value]) -> R<()> {
+    if !matches!(a[0].deref(), Value::Resource(_)) {
+        let msg = format!("{f}(): Argument #1 ($stream) must be of type resource, {} given", zname(&a[0].deref()));
+        return vm.throw_error("TypeError", &msg);
+    }
+    Ok(())
+}
+
 fn fprintf(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "fprintf", &a, 2, -1)?;
+    stream_check(vm, "fprintf", &a)?;
     let fmt = p_str(vm, "fprintf", &a, 1, "format")?;
     let s = formatted_print(vm, &fmt, &a[2..], 2)?;
     vm.call_function_named("fwrite", vec![a[0].clone(), vstr(&s)])?;
@@ -491,6 +503,7 @@ fn fprintf(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
 
 fn vfprintf(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "vfprintf", &a, 3, 3)?;
+    stream_check(vm, "vfprintf", &a)?;
     let fmt = p_str(vm, "vfprintf", &a, 1, "format")?;
     let arr = p_array(vm, "vfprintf", &a, 2, "values")?;
     let s = formatted_print(vm, &fmt, &array_args(&arr), -1)?;

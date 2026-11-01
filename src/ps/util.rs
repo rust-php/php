@@ -63,6 +63,8 @@ pub fn p_str(vm: &mut Vm<'_>, f: &str, a: &[Value], i: usize, p: &str) -> R<Rc<s
             null_dep(vm, f, i, p, "string");
             Ok("".into())
         }
+        Value::Object(_) => vm.to_string_val(&v),
+        Value::Resource(_) => terr(vm, f, i, p, "string", &v),
         _ => Ok(v.to_str()),
     }
 }

@@ -447,7 +447,7 @@ fn str_pad(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
         return Ok(Value::Str(s));
     }
     if pad.is_empty() {
-        return ve(vm, "str_pad", 3, "pad_string", "must be a non-empty string");
+        return ve(vm, "str_pad", 3, "pad_string", "must not be empty");
     }
     if !(0..=2).contains(&ty) {
         return ve(vm, "str_pad", 4, "pad_type", "must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH");
@@ -632,14 +632,6 @@ fn strtr(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
 }
 
 // ---- comparison ----
-fn cmpr(o: std::cmp::Ordering) -> Value {
-    Value::Int(match o {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        _ => 1,
-    })
-}
-
 fn strcmp_family(vm: &mut Vm<'_>, f: &str, a: Vec<Value>, n: bool, ci: bool) -> R<Value> {
     argc(vm, f, &a, if n { 3 } else { 2 }, if n { 3 } else { 2 })?;
     let x = p_str(vm, f, &a, 0, "string1")?;
@@ -657,8 +649,17 @@ fn strcmp_family(vm: &mut Vm<'_>, f: &str, a: Vec<Value>, n: bool, ci: bool) -> 
         x.make_ascii_lowercase();
         y.make_ascii_lowercase();
     }
-    // PHP 8.2+: strcmp returns -1/0/1
-    Ok(cmpr(x.cmp(&y)))
+    // zend_binary_str(n)(case)cmp: difference of the first differing bytes, else three-way length compare
+    for (c1, c2) in x.iter().zip(y.iter()) {
+        if c1 != c2 {
+            return Ok(Value::Int(*c1 as i64 - *c2 as i64));
+        }
+    }
+    Ok(Value::Int(match x.len().cmp(&y.len()) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        _ => 1,
+    }))
 }
 
 // ---- utf8_encode / decode ----

@@ -284,85 +284,111 @@ fn implode_impl(vm: &mut Vm<'_>, glue: &str, arr: &PhpArray) -> R<String> {
                 warn(vm, "Array to string conversion");
                 out.push_str("Array");
             }
-            x => out.push_str(&x.to_str()),
+            x => {
+                let s = vm.to_string_val(&x)?;
+                out.push_str(&s)
+            }
         }
     }
     Ok(out)
 }
 
 fn implode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
-    argc(vm, "implode", &a, 1, 2)?;
+    implode_named(vm, "implode", a)
+}
+
+fn implode_named(vm: &mut Vm<'_>, f: &str, a: Vec<Value>) -> R<Value> {
+    argc(vm, f, &a, 1, 2)?;
     let a1 = a[0].deref();
     let a2 = a.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
     let pieces = match &a2 {
         Value::Array(x) => Some(x.clone()),
         Value::Null => None,
-        _ => return vm.throw_error("TypeError", &format!("implode(): Argument #2 ($array) must be of type ?array, {} given", zname(&a2))),
+        _ => return vm.throw_error("TypeError", &format!("{f}(): Argument #2 ($array) must be of type ?array, {} given", zname(&a2))),
     };
     let (glue, arr): (Rc<str>, Rc<PhpArray>) = match pieces {
         None => match &a1 {
             Value::Array(x) => ("".into(), x.clone()),
             Value::Str(_) => {
-                return vm.throw_error("TypeError", "implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given");
+                return vm.throw_error("TypeError", &format!("{f}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given"));
             }
-            _ => return vm.throw_error("TypeError", &format!("implode(): Argument #1 ($array) must be of type array|string, {} given", zname(&a1))),
+            _ => return vm.throw_error("TypeError", &format!("{f}(): Argument #1 ($array) must be of type array|string, {} given", zname(&a1))),
         },
         Some(x) => {
             if matches!(a1, Value::Array(_)) {
-                return vm.throw_error("TypeError", "implode(): Argument #1 ($separator) must be of type string, array given");
+                return vm.throw_error("TypeError", &format!("{f}(): Argument #1 ($separator) must be of type string, array given"));
             }
-            (p_str(vm, "implode", &a, 0, "separator")?, x)
+            (p_str(vm, f, &a, 0, "separator")?, x)
         }
     };
     Ok(vstr(&implode_impl(vm, &glue, &arr)?))
 }
 
 // ---- strtok ----
-thread_local! { static TOK: RefCell<(Vec<u8>, usize)> = const { RefCell::new((Vec::new(), 0)) }; }
+thread_local! { static TOK: RefCell<(Option<Vec<u8>>, usize)> = const { RefCell::new((None, 0)) }; }
 
 fn strtok(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     argc(vm, "strtok", &a, 1, 2)?;
-    let tok: Rc<str>;
-    if a.len() == 2 {
-        let s = p_str(vm, "strtok", &a, 0, "string")?;
-        tok = p_str(vm, "strtok", &a, 1, "token")?;
-        TOK.with(|t| *t.borrow_mut() = (s.as_bytes().to_vec(), 0));
-    } else {
-        tok = p_str(vm, "strtok", &a, 0, "string")?;
-    }
-    let set = tok.as_bytes();
-    let r = TOK.with(|t| {
-        let mut t = t.borrow_mut();
-        let buf = t.0.clone();
-        let pos = t.1;
-        if buf.is_empty() && pos == 0 {
-            return None;
+    let str_ = p_str(vm, "strtok", &a, 0, "string")?;
+    let tok: Rc<str> = match a.get(1).map(|v| v.deref()) {
+        None | Some(Value::Null) => str_.clone(),
+        Some(_) => {
+            let t = p_str(vm, "strtok", &a, 1, "token")?;
+            TOK.with(|s| *s.borrow_mut() = (Some(str_.as_bytes().to_vec()), 0));
+            t
         }
-        let mut p = pos;
-        while p < buf.len() && set.contains(&buf[p]) {
-            p += 1;
-        }
-        if p >= buf.len() {
-            t.0.clear();
-            t.1 = 0;
-            return None;
-        }
-        let start = p;
-        while p < buf.len() && !set.contains(&buf[p]) {
-            p += 1;
-        }
-        let res = buf[start..p].to_vec();
-        t.1 = if p < buf.len() { p + 1 } else { p };
-        if p >= buf.len() {
-            t.0.clear();
-            t.1 = 0;
-        }
-        Some(res)
+    };
+    let (buf, last) = TOK.with(|s| {
+        let s = s.borrow();
+        (s.0.clone(), s.1)
     });
-    Ok(match r {
-        Some(b) => from_bytes(&b),
-        None => Value::Bool(false),
-    })
+    let Some(buf) = buf else {
+        warn(vm, "strtok(): Both arguments must be provided when starting tokenization");
+        return Ok(Value::Bool(false));
+    };
+    let pe = buf.len();
+    let mut p = last;
+    if p >= pe {
+        return Ok(Value::Bool(false));
+    }
+    let mut table = [false; 256];
+    for &c in tok.as_bytes() {
+        table[c as usize] = true;
+    }
+    let mut skipped = 0usize;
+    let mut fail = false;
+    while table[buf[p] as usize] {
+        p += 1;
+        if p >= pe {
+            fail = true;
+            break;
+        }
+        skipped += 1;
+    }
+    let mut ret = Value::Bool(false);
+    if !fail {
+        let mut found = false;
+        loop {
+            p += 1;
+            if p >= pe {
+                break;
+            }
+            if table[buf[p] as usize] {
+                found = true;
+                break;
+            }
+        }
+        if found || p - last > 0 {
+            ret = from_bytes(&buf[last + skipped..p]);
+            TOK.with(|s| s.borrow_mut().1 = p + 1);
+        } else {
+            fail = true;
+        }
+    }
+    if fail {
+        TOK.with(|s| s.borrow_mut().0 = None);
+    }
+    Ok(ret)
 }
 
 // ---- case ----
@@ -771,7 +797,7 @@ pub fn register(m: &mut HashMap<&'static str, VmBuiltin>) {
     m.insert("wordwrap", wordwrap);
     m.insert("explode", explode);
     m.insert("implode", implode);
-    m.insert("join", implode);
+    m.insert("join", |vm, a| implode_named(vm, "join", a));
     m.insert("strtok", strtok);
     m.insert("strtoupper", strtoupper);
     m.insert("strtolower", strtolower);
