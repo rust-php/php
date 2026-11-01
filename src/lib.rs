@@ -8,6 +8,7 @@ pub mod parser;
 pub mod port_array;
 pub mod port_hash;
 pub mod port_misc;
+pub mod port_pack;
 pub mod port_string;
 pub mod port_var;
 pub mod prelude;
