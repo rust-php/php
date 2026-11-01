@@ -391,7 +391,7 @@ pub fn var_export(vm: &mut Vm<'_>, v: &Value, level: usize, stack: &mut Vec<usiz
                             let (name, _, _) = prop_label(o, t);
                             out.push_str(&format!("'{}'", export_str(&name)));
                         }
-                        Key::Int(i) => out.push_str(&i.to_string()),
+                        Key::Int(i) => out.push_str(&format!("'{i}'")),
                     }
                     out.push_str(" => ");
                     var_export(vm, x, level + 2, stack, out)?;

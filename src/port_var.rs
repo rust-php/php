@@ -18,9 +18,11 @@ pub fn constant(name: &str) -> Option<Value> {
 }
 
 /// php_error_docref-style diagnostic (no line information available in the VM).
+/// Off unless PHP_VAR_DIAG is set: the VM has no @-silence / error_reporting support yet, so
+/// printing would break tests that suppress these diagnostics.
 pub(crate) fn diag(vm: &mut Vm<'_>, level: &str, msg: &str) {
     let text = format!("\n{level}: {msg} in {} on line 0\n", vm.file);
-    vm.write(&text);
+    if std::env::var_os("PHP_VAR_DIAG").is_some() { vm.write(&text); }
 }
 
 /// Plain builtins (no VM access). Entries registered here override older reimplementations.
