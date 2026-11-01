@@ -7,6 +7,7 @@ pub mod args;
 pub mod math;
 pub mod mt;
 pub mod refs;
+pub mod setops;
 pub mod sort;
 
 /// Plain builtins (no VM access). Entries registered here override older reimplementations.
@@ -15,6 +16,7 @@ pub fn register(_m: &mut HashMap<&'static str, Builtin>) {}
 /// Builtins that need the VM (callbacks, output, exceptions).
 pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     math::register_vm(m);
+    setops::register_vm(m);
 }
 
 /// Constants defined by the array/math/random extensions.
