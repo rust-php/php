@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 pub mod args;
 pub mod math;
+pub mod misc;
 pub mod mt;
+pub mod range;
 pub mod refs;
 pub mod setops;
 pub mod sort;
@@ -17,6 +19,7 @@ pub fn register(_m: &mut HashMap<&'static str, Builtin>) {}
 pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     math::register_vm(m);
     setops::register_vm(m);
+    misc::register_vm(m);
 }
 
 /// Constants defined by the array/math/random extensions.
