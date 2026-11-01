@@ -12,14 +12,21 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match php::run_source(&src) {
-        Ok(out) => {
-            let _ = std::io::stdout().write_all(out.as_bytes());
-            ExitCode::SUCCESS
+    // Run on a big stack so deep PHP recursion does not overflow the Rust stack.
+    let worker = std::thread::Builder::new().stack_size(1 << 30).spawn(move || php::execute(&src));
+    let out = match worker.map(|h| h.join()) {
+        Ok(Ok(o)) => o,
+        _ => {
+            eprintln!("internal error: interpreter thread failed");
+            return ExitCode::from(70);
         }
-        Err(e) => {
-            eprintln!("PHP Fatal error:  {e}");
-            ExitCode::from(255)
-        }
+    };
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(out.out.as_bytes());
+    if let Some(m) = &out.fatal {
+        let _ = write!(stdout, "\nFatal error: {m}\n");
+        eprintln!("PHP Fatal error:  {m}");
     }
+    let _ = stdout.flush();
+    ExitCode::from(out.exit_code as u8)
 }
