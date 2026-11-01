@@ -16,6 +16,10 @@ mod core2;
 mod misc;
 #[path = "ps/strip.rs"]
 mod strip;
+#[path = "ps/entities.rs"]
+mod entities;
+#[path = "ps/html.rs"]
+mod html;
 #[path = "ps/fmt.rs"]
 mod fmt;
 #[path = "ps/consts.rs"]
@@ -34,6 +38,7 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     fmt::register(m);
     core1::register(m);
     core2::register(m);
+    html::register(m);
     misc::register(m);
     strip::register(m);
 }
