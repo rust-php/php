@@ -30,6 +30,8 @@ mod mb;
 mod scanf;
 #[path = "ps/numfmt.rs"]
 mod numfmt;
+#[path = "ps/csv.rs"]
+mod csv;
 #[path = "ps/fmt.rs"]
 mod fmt;
 #[path = "ps/consts.rs"]
@@ -48,6 +50,7 @@ pub fn register_vm(m: &mut HashMap<&'static str, VmBuiltin>) {
     fmt::register(m);
     core1::register(m);
     core2::register(m);
+    csv::register(m);
     numfmt::register(m);
     scanf::register(m);
     mb::register(m);
