@@ -1,7 +1,7 @@
 #!/bin/sh
 # Goal check for the rust-php rewrite. Prints GOAL_MET only when every project phase target is reached.
 # Oracle: php-src tests that the real php 8.1.2 passes (tests/oracle_*.txt).
-# Targets (from the Project): Phase 3 Zend/tests >= 90%, Phase 4 ext/standard >= 85%, Phase 8 JIT present.
+# Targets: Phase 3 Zend/tests >= 100%, Phase 4 ext/standard >= 100% (port must match php-src tests), Phase 8 JIT present.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNNER="$ROOT/phpt-runner/target/release/phpt-runner"
@@ -21,8 +21,8 @@ pct() { # name oracle-file test-dir target
   [ "$v" -ge "$4" ] || fail=1
 }
 
-pct "Phase 3 Zend/tests" oracle_zend_pass.txt Zend/tests 90
-pct "Phase 4 ext/standard" oracle_ext_standard.txt ext/standard/tests 85
+pct "Phase 3 Zend/tests" oracle_zend_pass.txt Zend/tests 100
+pct "Phase 4 ext/standard" oracle_ext_standard.txt ext/standard/tests 100
 
 state=$(gh issue view 4 -R rust-php/php --json state --jq .state 2>/dev/null)
 echo "Phase 3 issue #4 state: ${state:-unknown}"

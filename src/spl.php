@@ -340,3 +340,29 @@ class RecursiveDirectoryIterator extends ArrayIterator implements RecursiveItera
     public function getChildren(): RecursiveDirectoryIterator { return new RecursiveDirectoryIterator($this->__dir . '/' . $this->current()); }
     public function getFilename() { return $this->current(); }
 }
+
+final class WeakReference {
+    private $__o;
+    private function __construct() {}
+    public static function create(object $object): WeakReference { $r = new WeakReference(); $r->__o = $object; return $r; }
+    public function get(): ?object { return $this->__o; }
+}
+
+final class WeakMap implements ArrayAccess, Countable, IteratorAggregate {
+    private $__k = [];
+    private $__v = [];
+    public function offsetExists($object): bool { return isset($this->__k[spl_object_id($object)]); }
+    public function offsetGet($object): mixed {
+        $h = spl_object_id($object);
+        if (!isset($this->__k[$h])) { throw new Error('Object ' . get_class($object) . '#' . $h . ' not contained in WeakMap'); }
+        return $this->__v[$h];
+    }
+    public function offsetSet($object, $value): void { $h = spl_object_id($object); $this->__k[$h] = $object; $this->__v[$h] = $value; }
+    public function offsetUnset($object): void { $h = spl_object_id($object); unset($this->__k[$h], $this->__v[$h]); }
+    public function count(): int { return count($this->__k); }
+    public function getIterator(): Iterator {
+        $out = [];
+        foreach ($this->__k as $h => $obj) { $out[] = [$obj, $this->__v[$h]]; }
+        return (function () use ($out) { foreach ($out as [$o, $v]) { yield $o => $v; } })();
+    }
+}
