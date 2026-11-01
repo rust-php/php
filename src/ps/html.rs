@@ -26,6 +26,7 @@ const LONGEST_ENTITY_LENGTH: usize = 31;
 enum Cs {
     Utf8,
     Unicode,
+    Latin1,
     Partial,
 }
 
@@ -45,6 +46,9 @@ fn determine_charset(vm: &mut Vm<'_>, f: &str, hint: Option<&str>, quiet: bool) 
     }
     let lc = hint.to_ascii_lowercase();
     if hint.len() <= 12 {
+        if lc == "iso-8859-1" || lc == "iso8859-1" {
+            return Cs::Latin1;
+        }
         if SUPPORTED.contains(&lc.as_str()) {
             return Cs::Unicode;
         }
@@ -209,7 +213,7 @@ fn push_cp(out: &mut Vec<u8>, cp: u32) {
     }
 }
 
-fn unescape(input: &[u8], all: bool, flags: i64) -> Vec<u8> {
+fn unescape(input: &[u8], all: bool, flags: i64, latin1: bool) -> Vec<u8> {
     let inv = decode_map(all, flags);
     let doctype = flags & DOC_MASK;
     let mut out = Vec::with_capacity(input.len());
@@ -279,6 +283,11 @@ fn unescape(input: &[u8], all: bool, flags: i64) -> Vec<u8> {
             continue;
         }
         if (code == b'\'' as u32 && flags & Q_SINGLE == 0) || (code == b'"' as u32 && flags & Q_DOUBLE == 0) {
+            out.extend_from_slice(&input[p..entity_end]);
+            p = entity_end;
+            continue;
+        }
+        if latin1 && (code > 0xFF || code2 != 0) {
             out.extend_from_slice(&input[p..entity_end]);
             p = entity_end;
             continue;
@@ -425,7 +434,7 @@ fn htmlspecialchars_decode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     if !s.contains('&') {
         return Ok(Value::Str(s));
     }
-    Ok(from_bytes(&unescape(s.as_bytes(), false, qs)))
+    Ok(from_bytes(&unescape(s.as_bytes(), false, qs, false)))
 }
 
 fn html_entity_decode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
@@ -439,8 +448,8 @@ fn html_entity_decode(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     if !s.contains('&') {
         return Ok(Value::Str(s));
     }
-    determine_charset(vm, "html_entity_decode", hint.as_deref(), false);
-    Ok(from_bytes(&unescape(s.as_bytes(), true, qs)))
+    let cs = determine_charset(vm, "html_entity_decode", hint.as_deref(), false);
+    Ok(from_bytes(&unescape(s.as_bytes(), true, qs, cs == Cs::Latin1)))
 }
 
 fn get_html_translation_table(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
@@ -465,13 +474,16 @@ fn get_html_translation_table(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
         let t = tables();
         let m = if doctype == DOC_HTML5 { &t.enc5 } else { &t.enc4 };
         for (&cp, (def, multi)) in m {
-            if skip(cp) {
+            if skip(cp) || (cs == Cs::Latin1 && cp > 0xFF) {
                 continue;
             }
             if let Some(d) = def {
                 r.set(Key::from_str(&key(cp, 0)), vstr(&format!("&{d};")));
             }
             for (cp2, n) in multi {
+                if cs == Cs::Latin1 {
+                    continue;
+                }
                 r.set(Key::from_str(&key(cp, *cp2)), vstr(&format!("&{n};")));
             }
         }
