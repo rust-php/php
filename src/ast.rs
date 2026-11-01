@@ -54,8 +54,19 @@ pub enum Expr {
     Match(Box<Expr>, Vec<(Vec<Expr>, Expr)>, Option<Box<Expr>>),
 }
 
+/// A declared type such as `?int`, `int|string` or `Foo`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeHint {
+    /// Lowercased member names (`int`, `string`, `foo`, ...).
+    pub names: Vec<String>,
+    pub nullable: bool,
+    /// Source spelling for messages.
+    pub display: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Param {
+    pub ty: Option<TypeHint>,
     pub name: String,
     pub default: Option<Expr>,
     /// Constructor property promotion (`public function __construct(private $x)`).
@@ -66,6 +77,7 @@ pub struct Param {
 
 #[derive(Debug, Clone)]
 pub struct FuncDecl {
+    pub ret: Option<TypeHint>,
     pub name: String,
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
@@ -89,6 +101,8 @@ pub enum ClassKind {
 
 #[derive(Debug, Clone)]
 pub struct PropDecl {
+    pub ty: Option<TypeHint>,
+    pub readonly: bool,
     pub name: String,
     pub default: Option<Expr>,
     pub is_static: bool,

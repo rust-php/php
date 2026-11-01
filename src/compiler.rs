@@ -75,6 +75,9 @@ pub enum Op {
     // Exceptions and constants.
     Throw,
     Yield(bool),
+    CoerceParam(u16, u32, u8),
+    CheckRet(u32),
+    RetNone(u32),
     JmpIfInstance(u32, u32),
     MatchError,
     ConstGet(u32),
@@ -99,6 +102,7 @@ pub struct Func {
     pub ref_params: Vec<bool>,
     pub variadic: bool,
     pub is_generator: bool,
+    pub param_names: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -112,6 +116,8 @@ pub struct MethodDef {
 
 #[derive(Debug)]
 pub struct PropDef {
+    pub ty: Option<TypeHint>,
+    pub readonly: bool,
     pub name: String,
     pub thunk: Option<usize>,
     pub is_static: bool,
@@ -146,6 +152,7 @@ pub struct Program {
     pub main_locals: HashMap<String, u16>,
     pub global_names: HashSet<String>,
     pub static_count: u32,
+    pub types: Vec<TypeHint>,
 }
 
 struct LoopCtx {
@@ -163,10 +170,11 @@ struct Fc<'a> {
     finallys: Vec<(Vec<Stmt>, usize)>,
     handlers: Vec<Handler>,
     has_yield: bool,
+    ret_ty: Option<u32>,
 }
 
 fn new_fc(prog: &mut Program) -> Fc<'_> {
-    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![], has_yield: false };
+    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![], has_yield: false, ret_ty: None };
     fc.slot("this");
     fc
 }
@@ -180,7 +188,7 @@ pub fn compile(stmts: &[Stmt]) -> R<Program> {
     fc.code.push(Op::Halt);
     let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
     let main_locals = fc.locals.clone();
-    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false };
+    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![], ref_params: vec![], variadic: false, is_generator: false, param_names: vec![] };
     prog.main_locals = main_locals;
     Ok(prog)
 }
@@ -507,6 +515,9 @@ impl Fc<'_> {
                     Some(e) => self.expr(e)?,
                     None => self.push_const(Value::Null),
                 }
+                if let (Some(ti), Some(_)) = (self.ret_ty, e) {
+                    self.emit(Op::CheckRet(ti));
+                }
                 if !self.finallys.is_empty() {
                     let tmp = self.hidden();
                     self.emit(Op::Store(tmp));
@@ -705,6 +716,16 @@ impl Fc<'_> {
         }
         let capture_slots: Vec<u16> = uses.iter().map(|u| sub.slot(u)).collect();
         for (i, p) in f.params.iter().enumerate() {
+            if let (Some(t), false, false) = (&p.ty, p.variadic, p.by_ref) {
+                let ti = sub.type_idx(t);
+                let slot = sub.slot(&p.name);
+                sub.emit(Op::CoerceParam(slot, ti, i as u8));
+            }
+        }
+        sub.ret_ty = f.ret.as_ref().filter(|t| !matches!(t.names[0].as_str(), "void" | "never" | "mixed") || t.names.len() > 1).map(|t| t.clone()).map(|t| sub.type_idx(&t));
+        let ret_none_needs_error = f.ret.as_ref().is_some_and(|t| !t.nullable && !t.names.iter().any(|n| matches!(n.as_str(), "void" | "never" | "mixed" | "null")));
+        let ret_idx = f.ret.as_ref().map(|t| sub.type_idx(t));
+        for (i, p) in f.params.iter().enumerate() {
             if let Some(d) = &p.default {
                 let skip = sub.emit(Op::SkipIfArg(i as u8, 0));
                 sub.expr(d)?;
@@ -716,6 +737,9 @@ impl Fc<'_> {
             }
         }
         sub.block(&f.body)?;
+        if let (true, Some(ti)) = (ret_none_needs_error, ret_idx) {
+            sub.emit(Op::RetNone(ti));
+        }
         sub.push_const(Value::Null);
         sub.emit(Op::Ret);
         let (code, nlocals, handlers, is_generator) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers), sub.has_yield);
@@ -730,12 +754,21 @@ impl Fc<'_> {
             ref_params: f.params.iter().map(|p| p.by_ref).collect(),
             variadic: f.params.last().is_some_and(|p| p.variadic),
             is_generator,
+            param_names: f.params.iter().map(|p| p.name.clone()).collect(),
         });
         Ok(idx)
     }
 
+    fn type_idx(&mut self, t: &TypeHint) -> u32 {
+        if let Some(i) = self.prog.types.iter().position(|x| x == t) {
+            return i as u32;
+        }
+        self.prog.types.push(t.clone());
+        (self.prog.types.len() - 1) as u32
+    }
+
     fn thunk(&mut self, e: &Expr) -> R<usize> {
-        let f = FuncDecl { name: "{thunk}".into(), params: vec![], body: vec![Stmt::Return(Some(e.clone()))] };
+        let f = FuncDecl { ret: None, name: "{thunk}".into(), params: vec![], body: vec![Stmt::Return(Some(e.clone()))] };
         self.compile_function(&f, &[])
     }
 
@@ -769,14 +802,14 @@ impl Fc<'_> {
                 Some(e) => Some(self.thunk(e)?),
                 None => None,
             };
-            def.props.push(PropDef { name: p.name.clone(), thunk, is_static: p.is_static, vis: p.vis });
+            def.props.push(PropDef { ty: p.ty.clone(), readonly: p.readonly, name: p.name.clone(), thunk, is_static: p.is_static, vis: p.vis });
         }
         for m in &c.methods {
             let mut func = m.func.clone();
             if func.name.eq_ignore_ascii_case("__construct") {
                 let mut prefix = vec![];
                 for p in func.params.iter().filter(|p| p.promote) {
-                    def.props.push(PropDef { name: p.name.clone(), thunk: None, is_static: false, vis: 0 });
+                    def.props.push(PropDef { ty: p.ty.clone(), readonly: false, name: p.name.clone(), thunk: None, is_static: false, vis: 0 });
                     prefix.push(Stmt::Expr(Expr::Assign(
                         Box::new(Expr::Prop { obj: Box::new(Expr::Var("this".into())), name: Box::new(Expr::Str(p.name.clone())), nullsafe: false }),
                         Box::new(Expr::Var(p.name.clone())),
@@ -785,6 +818,7 @@ impl Fc<'_> {
                 prefix.extend(std::mem::take(&mut func.body));
                 func.body = prefix;
             }
+            func.name = format!("{}::{}", c.name, m.func.name);
             let idx = self.compile_function(&func, &[])?;
             def.methods.push(MethodDef { name: m.func.name.clone(), func: idx, is_static: m.is_static, is_abstract: m.is_abstract, vis: m.vis });
         }

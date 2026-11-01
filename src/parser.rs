@@ -297,9 +297,9 @@ impl Parser {
                 let Tok::Ident(name) = self.next() else { unreachable!() };
                 self.expect_op("(")?;
                 let params = self.params()?;
-                self.skip_return_type();
+                let ret = self.parse_return_type();
                 let body = self.body()?;
-                Ok(Stmt::Func(FuncDecl { name, params, body }))
+                Ok(Stmt::Func(FuncDecl { ret, name, params, body }))
             }
             "abstract" | "final" | "readonly" | "class" | "interface" | "trait" | "enum"
                 if (kw != "class" && kw != "interface" && kw != "trait" && kw != "enum") || matches!(self.peek_at(1), Tok::Ident(_)) =>
@@ -417,12 +417,45 @@ impl Parser {
         self.var_name()
     }
 
-    fn skip_return_type(&mut self) {
-        if self.eat_op(":") {
-            while matches!(self.peek(), Tok::Ident(_) | Tok::Op("?") | Tok::Op("|") | Tok::Op("&") | Tok::Op("(") | Tok::Op(")")) {
-                self.pos += 1;
+    /// Parse `T`, `?T`, `A|B`, `A&B` (stops before a by-reference `&$x`).
+    fn parse_type(&mut self) -> Option<TypeHint> {
+        let mut names = Vec::new();
+        let mut nullable = false;
+        let mut display = String::new();
+        loop {
+            match self.peek().clone() {
+                Tok::Op("?") => {
+                    nullable = true;
+                    display.push('?');
+                }
+                Tok::Op("|") => display.push('|'),
+                Tok::Op("&") if !matches!(self.peek_at(1), Tok::Var(_) | Tok::Op("...")) => display.push('&'),
+                Tok::Op("(") | Tok::Op(")") if !names.is_empty() || matches!(self.peek(), Tok::Op("(")) => {
+                    if matches!(self.peek(), Tok::Op(")")) && !self.type_continues() {
+                        break;
+                    }
+                }
+                Tok::Ident(n) => {
+                    let l = n.to_ascii_lowercase();
+                    if l == "null" {
+                        nullable = true;
+                    }
+                    display.push_str(&n);
+                    names.push(l);
+                }
+                _ => break,
             }
+            self.pos += 1;
         }
+        if names.is_empty() { None } else { Some(TypeHint { names, nullable, display }) }
+    }
+
+    fn type_continues(&self) -> bool {
+        matches!(self.peek_at(1), Tok::Op("|") | Tok::Op("&"))
+    }
+
+    fn parse_return_type(&mut self) -> Option<TypeHint> {
+        if self.eat_op(":") { self.parse_type() } else { None }
     }
 
     fn ident(&mut self) -> R<String> {
@@ -516,7 +549,7 @@ impl Parser {
                 decl.cases.push((n, v));
                 continue;
             }
-            let (mut vis, mut is_static, mut m_abstract) = (0u8, false, false);
+            let (mut vis, mut is_static, mut m_abstract, mut readonly) = (0u8, false, false, false);
             loop {
                 let Tok::Ident(w) = self.peek().clone() else { break };
                 match w.to_ascii_lowercase().as_str() {
@@ -525,7 +558,8 @@ impl Parser {
                     "private" => vis = 2,
                     "static" => is_static = true,
                     "abstract" => m_abstract = true,
-                    "final" | "readonly" => {}
+                    "readonly" => readonly = true,
+                    "final" => {}
                     _ => break,
                 }
                 self.pos += 1;
@@ -551,22 +585,20 @@ impl Parser {
                 let name = self.ident()?;
                 self.expect_op("(")?;
                 let params = self.params()?;
-                self.skip_return_type();
+                let ret = self.parse_return_type();
                 let (body, abstract_now) = if self.is_op("{") { (self.body()?, false) } else { self.end_stmt()?; (vec![], true) };
                 decl.methods.push(MethodDecl {
-                    func: FuncDecl { name, params, body },
+                    func: FuncDecl { ret, name, params, body },
                     is_static,
                     is_abstract: m_abstract || abstract_now,
                     vis,
                 });
             } else {
-                while matches!(self.peek(), Tok::Ident(_) | Tok::Op("?") | Tok::Op("|") | Tok::Op("&") | Tok::Op("(") | Tok::Op(")")) {
-                    self.pos += 1;
-                }
+                let ty = self.parse_type();
                 loop {
                     let name = self.var_name()?;
                     let default = if self.eat_op("=") { Some(self.expr(0)?) } else { None };
-                    decl.props.push(PropDecl { name, default, is_static, vis });
+                    decl.props.push(PropDecl { ty: ty.clone(), readonly, name, default, is_static, vis });
                     if !self.eat_op(",") {
                         break;
                     }
@@ -581,17 +613,20 @@ impl Parser {
         let mut params = Vec::new();
         while !self.eat_op(")") {
             let mut promote = false;
-            while matches!(self.peek(), Tok::Ident(_) | Tok::Op("?") | Tok::Op("|")) {
-                if let Tok::Ident(w) = self.peek() {
-                    promote |= matches!(w.to_ascii_lowercase().as_str(), "public" | "protected" | "private" | "readonly");
+            while let Tok::Ident(w) = self.peek() {
+                if matches!(w.to_ascii_lowercase().as_str(), "public" | "protected" | "private" | "readonly") {
+                    promote = true;
+                    self.pos += 1;
+                } else {
+                    break;
                 }
-                self.pos += 1;
             }
+            let ty = self.parse_type();
             let by_ref = self.eat_op("&");
             let variadic = self.eat_op("...");
             let name = self.var_name()?;
             let default = if self.eat_op("=") { Some(self.expr(4)?) } else { None };
-            params.push(Param { name, default, promote, by_ref, variadic });
+            params.push(Param { ty, name, default, promote, by_ref, variadic });
             if !self.eat_op(",") {
                 self.expect_op(")")?;
                 break;
@@ -941,14 +976,14 @@ impl Parser {
                 self.eat_op(",");
             }
         }
-        self.skip_return_type();
+        let ret = self.parse_return_type();
         let body = if arrow {
             self.expect_op("=>")?;
             vec![Stmt::Return(Some(self.expr(4)?))]
         } else {
             self.body()?
         };
-        Ok(Expr::Closure(Box::new(ClosureDecl { func: FuncDecl { name: "{closure}".into(), params, body }, uses, arrow })))
+        Ok(Expr::Closure(Box::new(ClosureDecl { func: FuncDecl { ret, name: "{closure}".into(), params, body }, uses, arrow })))
     }
 
     fn match_expr(&mut self) -> R<Expr> {

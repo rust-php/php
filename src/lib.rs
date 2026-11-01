@@ -169,6 +169,17 @@ mod tests {
     }
 
     #[test]
+    fn types() {
+        t("function f(int $x): string { return $x; } var_dump(f('5'));", "string(1) \"5\"\n");
+        t("function f(int $x) {} try { f('abc'); } catch (TypeError $e) { echo get_class($e); }", "TypeError");
+        t("function g(): int { return 'x'; } try { g(); } catch (TypeError $e) { echo $e->getMessage(); }", "g(): Return value must be of type int, string returned");
+        t("function h(?int $x = null, int|string $y = 2) { return $x ?? $y; } echo h(), h(7), h(null, 'z');", "27z");
+        t("class A { public int $n; } $a = new A; try { echo $a->n; } catch (Error $e) { echo $e->getMessage(); }", "Typed property A::$n must not be accessed before initialization");
+        t("class P { public readonly int $x; function __construct() { $this->x = 1; } } $p = new P; try { $p->x = 2; } catch (Error $e) { echo $e->getMessage(); }", "Cannot modify readonly property P::$x");
+        t("class T { public int $v = 0; } $t = new T; $t->v = '12'; var_dump($t->v); try { $t->v = 'x'; } catch (TypeError $e) { echo $e->getMessage(); }", "int(12)\nCannot assign string to property T::$v of type int");
+    }
+
+    #[test]
     fn inline_html_and_errors() {
         assert_eq!(run_source("a<?php echo 1; ?>\nb").unwrap(), "a1b");
         assert!(run_source("<?php echo 1/0;").is_err());

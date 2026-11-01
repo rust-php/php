@@ -22,6 +22,8 @@ pub struct Method {
 
 #[derive(Clone)]
 pub struct PropInfo {
+    pub ty: Option<crate::ast::TypeHint>,
+    pub readonly: bool,
     pub name: String,
     pub thunk: Option<usize>,
     pub vis: u8,
@@ -62,6 +64,10 @@ impl Class {
 
     pub fn find_method(&self, lname: &str) -> Option<Rc<Method>> {
         self.methods.get(lname).cloned()
+    }
+
+    pub fn prop_info(&self, name: &str) -> Option<&PropInfo> {
+        self.props.iter().rev().find(|p| p.name == name)
     }
 
     pub fn prop_vis(&self, name: &str) -> Option<(u8, &str)> {

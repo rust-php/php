@@ -1,5 +1,5 @@
 //! Stack-machine interpreter with classes, closures and exceptions.
-use crate::ast::ClassKind;
+use crate::ast::{ClassKind, TypeHint};
 use crate::builtins;
 use crate::compiler::{Func, Op, Program, NO_SLOT};
 use crate::object::*;
@@ -166,7 +166,7 @@ impl<'p> Vm<'p> {
             if p.is_static {
                 static_thunks.push((p.name.clone(), p.thunk));
             } else {
-                let info = PropInfo { name: p.name.clone(), thunk: p.thunk, vis: p.vis, class: def.name.clone() };
+                let info = PropInfo { ty: p.ty.clone(), readonly: p.readonly, name: p.name.clone(), thunk: p.thunk, vis: p.vis, class: def.name.clone() };
                 match props.iter().position(|x| x.name == p.name) {
                     Some(at) => props[at] = info,
                     None => props.push(info),
@@ -292,6 +292,9 @@ impl<'p> Vm<'p> {
         }
         let mut props = PhpArray::new();
         for p in &class.props {
+            if p.thunk.is_none() && p.ty.is_some() {
+                continue; // typed property without default stays uninitialized
+            }
             let v = match p.thunk {
                 Some(t) => {
                     let owner = self.class_by_name(&p.class).unwrap_or_else(|| class.clone());
@@ -801,6 +804,43 @@ impl<'p> Vm<'p> {
                     }
                 }
                 Op::Halt => return Ok(Step::Return(Value::Null)),
+                Op::CoerceParam(slot, ty, i) => {
+                    if (i as usize) < fr.argc {
+                        let v = get_local(&fr.locals, slot);
+                        let ty = &prog.types[ty as usize];
+                        match self.coerce_to(v.clone(), ty, &fr.ctx)? {
+                            Some(nv) => set_local(&mut fr.locals, slot, nv),
+                            None => {
+                                let pname = f.param_names.get(i as usize).cloned().unwrap_or_default();
+                                let msg = format!(
+                                    "{}(): Argument #{} (${}) must be of type {}, {} given, called in {} on line 0",
+                                    f.name, i + 1, pname, ty.display, type_name_of(&v), self.file
+                                );
+                                return self.throw_error("TypeError", &msg);
+                            }
+                        }
+                    }
+                }
+                Op::CheckRet(ty) => {
+                    if !f.is_generator {
+                        let v = pop!();
+                        let ty = &prog.types[ty as usize];
+                        match self.coerce_to(v.clone(), ty, &fr.ctx)? {
+                            Some(nv) => fr.st.push(nv),
+                            None => {
+                                let msg = format!("{}(): Return value must be of type {}, {} returned", f.name, ty.display, type_name_of(&v));
+                                return self.throw_error("TypeError", &msg);
+                            }
+                        }
+                    }
+                }
+                Op::RetNone(ty) => {
+                    if !f.is_generator {
+                        let ty = &prog.types[ty as usize];
+                        let msg = format!("{}(): Return value must be of type {}, none returned", f.name, ty.display);
+                        return self.throw_error("TypeError", &msg);
+                    }
+                }
                 Op::MakeRef(slot) => {
                     let cell = make_ref_cell(&mut fr.locals[slot as usize]);
                     fr.st.push(Value::Ref(cell));
@@ -915,10 +955,16 @@ impl<'p> Vm<'p> {
                             let v = o.props.borrow().get(&Key::from_str(&name)).cloned();
                             match v {
                                 Some(v) => v,
-                                None => match o.class.find_method("__get") {
-                                    Some(m) => self.call_method(&obj, &m, vec![Value::Str(name)])?,
-                                    None => Value::Null,
-                                },
+                                None => {
+                                    let typed = o.class.prop_info(&name).filter(|pi| pi.ty.is_some()).map(|pi| pi.class.clone());
+                                    if let Some(c) = typed {
+                                        return self.throw_error("Error", &format!("Typed property {c}::${name} must not be accessed before initialization"));
+                                    }
+                                    match o.class.find_method("__get") {
+                                        Some(m) => self.call_method(&obj, &m, vec![Value::Str(name)])?,
+                                        None => Value::Null,
+                                    }
+                                }
                             }
                         }
                         _ => Value::Null,
@@ -926,7 +972,7 @@ impl<'p> Vm<'p> {
                     fr.st.push(r);
                 }
                 Op::AssignProp => {
-                    let v = pop!();
+                    let mut v = pop!();
                     let name = pop!().to_str();
                     let obj = pop!();
                     let Value::Object(o) = &obj else {
@@ -934,6 +980,26 @@ impl<'p> Vm<'p> {
                     };
                     let key = Key::from_str(&name);
                     let exists = o.props.borrow().get(&key).is_some();
+                    if let Some(pi) = o.class.prop_info(&name).cloned() {
+                        if pi.readonly {
+                            if exists {
+                                return self.throw_error("Error", &format!("Cannot modify readonly property {}::${}", pi.class, name));
+                            }
+                            let in_scope = fr.ctx.self_class.as_ref().is_some_and(|c| c.name.eq_ignore_ascii_case(&pi.class));
+                            if !in_scope {
+                                let scope = fr.ctx.self_class.as_ref().map(|c| format!("scope {}", c.name)).unwrap_or_else(|| "global scope".into());
+                                return self.throw_error("Error", &format!("Cannot initialize readonly property {}::${} from {}", pi.class, name, scope));
+                            }
+                        }
+                        if let Some(ty) = &pi.ty {
+                            match self.coerce_to(v.clone(), ty, &fr.ctx)? {
+                                Some(nv) => v = nv,
+                                None => {
+                                    return self.throw_error("TypeError", &format!("Cannot assign {} to property {}::${} of type {}", type_name_of(&v), pi.class, name, ty.display));
+                                }
+                            }
+                        }
+                    }
                     match o.class.find_method("__set") {
                         Some(m) if !exists => {
                             self.call_method(&obj, &m, vec![Value::Str(name), v.clone()])?;
@@ -1183,6 +1249,75 @@ impl<'p> Vm<'p> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn type_matches(&self, v: &Value, n: &str, ctx: &CallCtx) -> bool {
+        match (n, v) {
+            ("mixed", _) => true,
+            ("int", Value::Int(_)) | ("float", Value::Float(_)) | ("string", Value::Str(_)) | ("bool", Value::Bool(_)) => true,
+            ("false", Value::Bool(false)) | ("true", Value::Bool(true)) | ("array", Value::Array(_)) | ("null", Value::Null) => true,
+            ("object", Value::Object(_)) => true,
+            ("iterable", Value::Array(_)) => true,
+            ("iterable", Value::Object(o)) => o.class.is_a("traversable"),
+            ("callable", Value::Object(o)) => matches!(&*o.extra.borrow(), Extra::Closure(_)) || o.class.find_method("__invoke").is_some(),
+            ("callable", Value::Str(s)) => self.prog.func_index.contains_key(&lc(s)) || builtins::exists(&lc(s)) || s.contains("::"),
+            ("callable", Value::Array(a)) => a.len() == 2,
+            ("self", Value::Object(o)) => ctx.self_class.as_ref().is_some_and(|c| o.class.is_a(&lc(&c.name))),
+            ("static", Value::Object(o)) => ctx.static_class.as_ref().or(ctx.self_class.as_ref()).is_some_and(|c| o.class.is_a(&lc(&c.name))),
+            (_, Value::Object(o)) => o.class.is_a(n),
+            _ => false,
+        }
+    }
+
+    /// Coerce `v` to type `ty` using PHP's weak-mode rules. `None` means a type mismatch.
+    fn coerce_to(&mut self, v: Value, ty: &TypeHint, ctx: &CallCtx) -> R<Option<Value>> {
+        if matches!(v, Value::Null) {
+            return Ok(if ty.nullable || ty.names.iter().any(|n| n == "mixed" || n == "null") { Some(v) } else { None });
+        }
+        if ty.display.contains('&') {
+            return Ok(ty.names.iter().all(|n| self.type_matches(&v, n, ctx)).then_some(v));
+        }
+        if ty.names.iter().any(|n| self.type_matches(&v, n, ctx)) {
+            return Ok(Some(v));
+        }
+        let has = |t: &str| ty.names.iter().any(|n| n == t);
+        if has("int") {
+            match &v {
+                Value::Float(f) if f.is_finite() && (f.fract() == 0.0 || !has("string")) => return Ok(Some(Value::Int(*f as i64))),
+                Value::Bool(b) => return Ok(Some(Value::Int(*b as i64))),
+                Value::Str(s) => match parse_numeric(s) {
+                    Some((Num::I(i), true)) => return Ok(Some(Value::Int(i))),
+                    Some((Num::F(f), true)) if f.is_finite() && !has("float") => return Ok(Some(Value::Int(f as i64))),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        if has("float") {
+            match &v {
+                Value::Int(i) => return Ok(Some(Value::Float(*i as f64))),
+                Value::Bool(b) => return Ok(Some(Value::Float(*b as i64 as f64))),
+                Value::Str(s) => {
+                    if let Some((n, true)) = parse_numeric(s) {
+                        return Ok(Some(Value::Float(n.f())));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if has("string") {
+            match &v {
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) => return Ok(Some(Value::Str(v.to_str()))),
+                Value::Object(o) if o.class.find_method("__tostring").is_some() => return Ok(Some(Value::Str(self.to_string_val(&v)?))),
+                _ => {}
+            }
+        }
+        if has("bool") {
+            if let Value::Int(_) | Value::Float(_) | Value::Str(_) = &v {
+                return Ok(Some(Value::Bool(v.to_bool())));
+            }
+        }
+        Ok(None)
     }
 
     fn make_generator(&mut self, func: usize, frame: Frame) -> R<Value> {
@@ -1653,5 +1788,13 @@ fn write_back_elem(arr_cell: &Rc<RefCell<Value>>, var: &Value, p: usize) {
         if let Some(k) = arr.key_at(p - 1) {
             arr.set(k, newv);
         }
+    }
+}
+
+/// Type name as shown in TypeError messages.
+fn type_name_of(v: &Value) -> String {
+    match v {
+        Value::Object(o) => o.class.name.clone(),
+        other => other.type_name().to_string(),
     }
 }
