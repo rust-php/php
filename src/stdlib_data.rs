@@ -134,6 +134,7 @@ fn encode(vm: &mut Vm<'_>, v: &Value, flags: i64, depth: usize, out: &mut String
             out.push('}');
         }
         Value::Ref(r) => return encode(vm, &r.borrow().clone(), flags, depth, out),
+        Value::Resource(_) => return Ok(Err(JsonErr(8, "Type is not supported"))),
     }
     Ok(Ok(()))
 }
@@ -347,6 +348,7 @@ fn ser(vm: &mut Vm<'_>, v: &Value, out: &mut String) -> R<()> {
             out.push('}');
         }
         Value::Ref(r) => ser(vm, &r.borrow().clone(), out)?,
+        Value::Resource(_) => out.push_str("i:0;"),
     }
     Ok(())
 }

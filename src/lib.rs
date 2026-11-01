@@ -5,9 +5,14 @@ pub mod fiber;
 pub mod lexer;
 pub mod object;
 pub mod parser;
+pub mod port_array;
+pub mod port_string;
+pub mod port_var;
 pub mod prelude;
 pub mod refbuiltins;
 pub mod stdlib_arr;
+pub mod stdlib_file;
+pub mod stream;
 pub mod stdlib_data;
 pub mod stdlib_preg;
 pub mod stdlib_str;
@@ -222,6 +227,15 @@ mod tests {
         t("echo preg_replace_callback('/\\d+/', fn($m) => $m[0] * 2, 'a1 b22');", "a2 b44");
         t("echo preg_match('/(?<y>\\d{4})/', 'in 2024', $m), $m['y'];", "12024");
         t("ob_start(); echo 'hidden'; $x = ob_get_clean(); echo strtoupper($x);", "HIDDEN");
+    }
+
+    #[test]
+    fn files() {
+        t("$p = tempnam('/tmp', 'ph'); file_put_contents($p, \"a\\nb\\nc\\n\"); $h = fopen($p, 'r'); $n = 0; while (($l = fgets($h)) !== false) { $n++; } fclose($h); echo $n, count(file($p)), filesize($p); unlink($p); var_dump(file_exists($p));", "336bool(false)\n");
+        t("$h = fopen('php://memory', 'w+'); fwrite($h, 'hello'); rewind($h); echo fread($h, 3), ftell($h), stream_get_contents($h); var_dump(is_resource($h));", "hel3lobool(true)\n");
+        t("echo basename('/a/b/c.txt'), dirname('/a/b/c.txt'), pathinfo('x/y.tar.gz', PATHINFO_EXTENSION);", "c.txt/a/bgz");
+        t("echo json_encode(parse_url('https://u:p@h.com:81/p/q?x=1#f'));", "{\"scheme\":\"https\",\"host\":\"h.com\",\"port\":81,\"user\":\"u\",\"pass\":\"p\",\"path\":\"\\/p\\/q\",\"query\":\"x=1\",\"fragment\":\"f\"}");
+        t("fwrite(STDOUT, 'direct'); echo gettype(STDERR);", "directresource");
     }
 
     #[test]

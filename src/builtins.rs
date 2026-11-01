@@ -47,6 +47,28 @@ pub fn constant(name: &str) -> Option<Value> {
         "INF" => Value::Float(f64::INFINITY),
         "M_PI" => Value::Float(std::f64::consts::PI),
         "M_E" => Value::Float(std::f64::consts::E),
+        "STDIN" => Value::Resource(crate::stream::std_resource(0)),
+        "STDOUT" => Value::Resource(crate::stream::std_resource(1)),
+        "STDERR" => Value::Resource(crate::stream::std_resource(2)),
+        "DIRECTORY_SEPARATOR" => s("/"),
+        "PATH_SEPARATOR" => s(":"),
+        "PHP_OS_FAMILY" => s("Linux"),
+        "FILE_USE_INCLUDE_PATH" => Value::Int(1),
+        "LOCK_EX" => Value::Int(2),
+        "FILE_APPEND" => Value::Int(8),
+        "FILE_IGNORE_NEW_LINES" => Value::Int(2),
+        "FILE_SKIP_EMPTY_LINES" => Value::Int(4),
+        "LOCK_SH" => Value::Int(1),
+        "LOCK_UN" => Value::Int(3),
+        "SEEK_SET" => Value::Int(0),
+        "SEEK_CUR" => Value::Int(1),
+        "SEEK_END" => Value::Int(2),
+        "GLOB_BRACE" => Value::Int(1024),
+        "GLOB_ONLYDIR" => Value::Int(8192),
+        "PATHINFO_DIRNAME" => Value::Int(1),
+        "PATHINFO_BASENAME" => Value::Int(2),
+        "PATHINFO_EXTENSION" => Value::Int(4),
+        "PATHINFO_FILENAME" => Value::Int(8),
         "STR_PAD_RIGHT" => Value::Int(1),
         "STR_PAD_LEFT" => Value::Int(0),
         "STR_PAD_BOTH" => Value::Int(2),
@@ -71,6 +93,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
         let mut map_all: HashMap<&'static str, Builtin> = HashMap::new();
         crate::stdlib_str::register(&mut map_all);
         crate::stdlib_arr::register(&mut map_all);
+        crate::stdlib_file::register_simple(&mut map_all);
         for n in ["preg_quote", "preg_split", "preg_grep", "preg_last_error", "preg_last_error_msg"] {
             map_all.insert(n, match n {
                 "preg_quote" => |_, a| crate::stdlib_preg::simple("preg_quote", &a).unwrap(),
@@ -266,6 +289,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
                 Value::Array(_) => "array",
                 Value::Object(_) => "object",
                 Value::Ref(_) => "reference",
+                Value::Resource(r) => if r.is_closed() { "resource (closed)" } else { "resource" },
             }))),
             ("intval", |_, a| Ok(Value::Int(arg(&a, 0).to_int()))),
             ("floatval", |_, a| Ok(Value::Float(arg(&a, 0).to_float()))),
@@ -469,6 +493,9 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
         for (k, f) in list {
             map_all.insert(k, *f);
         }
+        crate::port_string::register(&mut map_all);
+        crate::port_array::register(&mut map_all);
+        crate::port_var::register(&mut map_all);
         map_all
     })
 }
@@ -682,6 +709,7 @@ fn var_dump(v: &Value, ind: usize, out: &mut String) {
     let pad = " ".repeat(ind);
     match v {
         Value::Ref(r) => var_dump(&r.borrow(), ind, out),
+        Value::Resource(r) => out.push_str(&format!("{pad}resource({}) of type ({})\n", r.id, if r.is_closed() { "Unknown" } else { r.kind })),
         Value::Null => out.push_str(&format!("{pad}NULL\n")),
         Value::Bool(b) => out.push_str(&format!("{pad}bool({b})\n")),
         Value::Int(i) => out.push_str(&format!("{pad}int({i})\n")),
@@ -773,6 +801,7 @@ fn var_export(v: &Value, ind: usize, out: &mut String) {
     let pad = " ".repeat(ind);
     match v {
         Value::Ref(r) => var_export(&r.borrow(), ind, out),
+        Value::Resource(_) => out.push_str("NULL"),
         Value::Null => out.push_str("NULL"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(i) => out.push_str(&i.to_string()),
@@ -820,7 +849,7 @@ fn var_export(v: &Value, ind: usize, out: &mut String) {
 
 pub(crate) type VmBuiltin = fn(&mut Vm<'_>, Vec<Value>) -> Result<Value, Flow>;
 
-fn bool_v(b: bool) -> Result<Value, Flow> {
+pub(crate) fn bool_v(b: bool) -> Result<Value, Flow> {
     Ok(Value::Bool(b))
 }
 
@@ -833,6 +862,7 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
     T.get_or_init(|| {
         let mut all: HashMap<&'static str, VmBuiltin> = HashMap::new();
         crate::stdlib_data::register(&mut all);
+        crate::stdlib_file::register_vm(&mut all);
         let list: &[(&str, VmBuiltin)] = &[
             ("count", |vm, a| match a.first() {
                 Some(Value::Array(x)) => Ok(Value::Int(x.len() as i64)),
@@ -1146,6 +1176,9 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
         for (k, f) in list {
             all.insert(k, *f);
         }
+        crate::port_string::register_vm(&mut all);
+        crate::port_array::register_vm(&mut all);
+        crate::port_var::register_vm(&mut all);
         all
     })
 }

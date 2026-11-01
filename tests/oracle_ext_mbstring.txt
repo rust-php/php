@@ -1,0 +1,8 @@
+PASS php-src/ext/mbstring/tests/gh17989.phpt
+PASS php-src/ext/mbstring/tests/zend_multibyte-15.phpt
+PASS php-src/ext/mbstring/tests/mb_list_encodings_gc_uaf.phpt
+PASS php-src/ext/mbstring/tests/gh13123.phpt
+PASS php-src/ext/mbstring/tests/zend_multibyte-14.phpt
+PASS php-src/ext/mbstring/tests/zend_multibyte-16.phpt
+PASS php-src/ext/mbstring/tests/zend_multibyte-10.phpt
+PASS php-src/ext/mbstring/tests/gh16229.phpt

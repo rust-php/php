@@ -12,6 +12,7 @@ impl Key {
     pub fn from_value(v: &Value) -> Result<Key, String> {
         Ok(match v {
             Value::Ref(r) => return Key::from_value(&r.borrow()),
+            Value::Resource(r) => Key::Int(r.id),
             Value::Int(i) => Key::Int(*i),
             Value::Str(s) => Key::from_str(s),
             Value::Bool(b) => Key::Int(*b as i64),
@@ -136,6 +137,7 @@ pub enum Value {
     Object(Rc<Obj>),
     /// A PHP reference cell. Only ever stored in variable slots, never seen by PHP code.
     Ref(Rc<RefCell<Value>>),
+    Resource(Rc<crate::stream::Resource>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -271,6 +273,7 @@ impl Value {
             Value::Array(_) => "array",
             Value::Object(_) => "object",
             Value::Ref(_) => "reference",
+            Value::Resource(_) => "resource",
         }
     }
     pub fn deref(&self) -> Value {
@@ -289,6 +292,7 @@ impl Value {
             Value::Array(a) => !a.is_empty(),
             Value::Object(_) => true,
             Value::Ref(r) => r.borrow().to_bool(),
+            Value::Resource(_) => true,
         }
     }
     pub fn to_int(&self) -> i64 {
@@ -305,6 +309,7 @@ impl Value {
             Value::Array(a) => !a.is_empty() as i64,
             Value::Object(_) => 1,
             Value::Ref(r) => r.borrow().to_int(),
+            Value::Resource(r) => r.id,
         }
     }
     pub fn to_float(&self) -> f64 {
@@ -325,6 +330,7 @@ impl Value {
             Value::Array(_) => "Array".into(),
             Value::Object(_) => "Object".into(),
             Value::Ref(r) => r.borrow().to_str(),
+            Value::Resource(r) => format!("Resource id #{}", r.id).into(),
         }
     }
 }
@@ -354,6 +360,7 @@ fn num_of(v: &Value, op: &str, other: &Value, left: bool) -> Result<Num, String>
         Value::Str(s) => parse_numeric(s).map(|(n, _)| n).ok_or_else(bad),
         Value::Array(_) | Value::Object(_) => Err(bad()),
         Value::Ref(r) => num_of(&r.borrow(), op, other, left),
+        Value::Resource(r) => Ok(Num::I(r.id)),
     }
 }
 
@@ -459,6 +466,9 @@ pub fn loose_cmp(a: &Value, b: &Value) -> Ordering {
     use Value::*;
     match (a, b) {
         (Ref(r), _) => loose_cmp(&r.borrow(), b),
+        (Resource(r), Resource(q)) => r.id.cmp(&q.id),
+        (Resource(r), _) => loose_cmp(&Int(r.id), b),
+        (_, Resource(r)) => loose_cmp(a, &Int(r.id)),
         (_, Ref(r)) => loose_cmp(a, &r.borrow()),
         (Int(x), Int(y)) => x.cmp(y),
         (Int(_) | Float(_), Int(_) | Float(_)) => num_cmp(as_num(a), as_num(b)),
@@ -523,6 +533,7 @@ pub fn strict_eq(a: &Value, b: &Value) -> bool {
                 && x.iter().zip(y.iter()).all(|((k1, v1), (k2, v2))| k1 == k2 && strict_eq(v1, v2))
         }
         (Object(x), Object(y)) => Rc::ptr_eq(x, y),
+        (Resource(x), Resource(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
