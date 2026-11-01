@@ -366,3 +366,28 @@ final class WeakMap implements ArrayAccess, Countable, IteratorAggregate {
         return (function () use ($out) { foreach ($out as [$o, $v]) { yield $o => $v; } })();
     }
 }
+
+class ReflectionException extends Exception {}
+
+class ReflectionClass implements Stringable {
+    public string $name = '';
+    public function __construct($objectOrClass) {
+        $n = is_object($objectOrClass) ? get_class($objectOrClass) : $objectOrClass;
+        if (!is_object($objectOrClass) && !class_exists($n) && !interface_exists($n)) {
+            throw new ReflectionException("Class \"$n\" does not exist");
+        }
+        $this->name = is_object($objectOrClass) ? get_class($objectOrClass) : $n;
+    }
+    public function getName(): string { return $this->name; }
+    public function getShortName(): string { $p = strrpos($this->name, '\\'); return $p === false ? $this->name : substr($this->name, $p + 1); }
+    public function getParentClass() { $p = get_parent_class($this->name); return $p === false ? false : new ReflectionClass($p); }
+    public function isInterface(): bool { return interface_exists($this->name) && !class_exists($this->name); }
+    public function isInstance($object): bool { return $object instanceof $this->name; }
+    public function isSubclassOf($class): bool { return is_subclass_of($this->name, $class instanceof ReflectionClass ? $class->name : $class); }
+    public function hasMethod($name): bool { return method_exists($this->name, $name); }
+    public function hasProperty($name): bool { return property_exists($this->name, $name); }
+    public function newInstance(...$args) { return new ($this->name)(...$args); }
+    public function newInstanceArgs(array $args = []) { return new ($this->name)(...$args); }
+    public function getConstants(): array { return []; }
+    public function __toString(): string { return "Class [ class {$this->name} ]"; }
+}
