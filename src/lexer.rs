@@ -136,10 +136,20 @@ fn lex_code(c: &[char], mut i: usize, out: &mut Vec<Tok>) -> Result<usize, Strin
             out.push(Tok::Var(c[s..i].iter().collect()));
             continue;
         }
-        if is_id_start(ch) {
-            let s = i;
-            while i < c.len() && is_id(c[i]) {
-                i += 1;
+        if is_id_start(ch) || (ch == '\\' && next.is_some_and(is_id_start)) {
+            // Namespaces are flattened: `A\B\C` and `\C` both lex as the last segment `C`.
+            let mut s = if ch == '\\' { i + 1 } else { i };
+            i = s;
+            loop {
+                while i < c.len() && is_id(c[i]) {
+                    i += 1;
+                }
+                if c.get(i) == Some(&'\\') && c.get(i + 1).copied().is_some_and(is_id_start) {
+                    i += 1;
+                    s = i;
+                } else {
+                    break;
+                }
             }
             out.push(Tok::Ident(c[s..i].iter().collect()));
             continue;

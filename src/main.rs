@@ -13,7 +13,8 @@ fn main() -> ExitCode {
         }
     };
     // Run on a big stack so deep PHP recursion does not overflow the Rust stack.
-    let worker = std::thread::Builder::new().stack_size(1 << 30).spawn(move || php::execute(&src));
+    let file = std::fs::canonicalize(&path).map(|p| p.display().to_string()).unwrap_or(path.clone());
+    let worker = std::thread::Builder::new().stack_size(1 << 30).spawn(move || php::execute_file(&src, &file));
     let out = match worker.map(|h| h.join()) {
         Ok(Ok(o)) => o,
         _ => {

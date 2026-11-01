@@ -2,7 +2,9 @@ pub mod ast;
 pub mod builtins;
 pub mod compiler;
 pub mod lexer;
+pub mod object;
 pub mod parser;
+pub mod prelude;
 pub mod value;
 pub mod vm;
 
@@ -15,15 +17,30 @@ pub struct Output {
 
 /// Compile and run PHP source, returning everything it printed.
 pub fn execute(src: &str) -> Output {
-    let prog = match parser::parse(src).and_then(|ast| compiler::compile(&ast)) {
+    execute_file(src, "")
+}
+
+pub fn execute_file(src: &str, file: &str) -> Output {
+    let prelude = match parser::parse(&prelude::source()) {
+        Ok(p) => p,
+        Err(e) => return Output { out: String::new(), fatal: Some(format!("prelude: {e}")), exit_code: 255 },
+    };
+    let user = match parser::parse(src) {
         Ok(p) => p,
         Err(e) => return Output { out: String::new(), fatal: Some(format!("PHP Parse error: {e}")), exit_code: 255 },
     };
+    let all: Vec<ast::Stmt> = prelude.into_iter().chain(user).collect();
+    let prog = match compiler::compile(&all) {
+        Ok(p) => p,
+        Err(e) => return Output { out: String::new(), fatal: Some(format!("PHP Fatal error: {e}")), exit_code: 255 },
+    };
     let mut machine = vm::Vm::new(&prog);
+    machine.file = file.to_string();
     let (fatal, exit_code) = match machine.run_main() {
         Ok(()) => (None, 0),
         Err(vm::Flow::Exit(c)) => (None, c),
         Err(vm::Flow::Fatal(m)) => (Some(m), 255),
+        Err(vm::Flow::Throw(v)) => (Some(machine.describe_uncaught(&v)), 255),
     };
     Output { out: std::mem::take(&mut machine.out), fatal, exit_code }
 }
@@ -93,6 +110,30 @@ mod tests {
         t("var_dump(1, 1.5, 'a', true, null);", "int(1)\nfloat(1.5)\nstring(1) \"a\"\nbool(true)\nNULL\n");
         t("print_r([1, [2]]);", "Array\n(\n    [0] => 1\n    [1] => Array\n        (\n            [0] => 2\n        )\n\n)\n");
         t("echo 0.1 + 0.2, ' ', 1e100, ' ', 9223372036854775807 + 1;", "0.3 1.0E+100 9.2233720368548E+18");
+    }
+
+    #[test]
+    fn classes_and_objects() {
+        t("class A { public $x = 1; function __construct($x = 5) { $this->x = $x; } function get() { return $this->x; } } $a = new A(7); echo $a->get(), $a->x;", "77");
+        t("class A { function hi() { return 'A'; } } class B extends A { function hi() { return parent::hi() . 'B'; } } echo (new B)->hi();", "AB");
+        t("class A { static $n = 0; const K = 3; static function inc() { return ++self::$n + static::K; } } echo A::inc(), A::inc(), A::K;", "4 5 3".replace(' ', "").as_str());
+        t("interface I { const X = 9; } class A implements I {} $a = new A; echo $a instanceof I ? 'y' : 'n', A::X;", "y9");
+        t("class A { public function __toString() { return 'str'; } } echo new A, 'x' . new A;", "strxstr");
+        t("class P { function __construct(private int $v) {} function v() { return $this->v; } } echo (new P(4))->v();", "4");
+        t("class A { public $a = []; } $o = new A; $o->a[] = 1; $o->a['k'] = 2; echo count($o->a);", "2");
+        t("abstract class S { abstract function f(); static function make() { return new static; } } class T extends S { function f() { return 't'; } } echo T::make()->f();", "t");
+    }
+
+    #[test]
+    fn exceptions_closures_match() {
+        t("try { throw new Exception('boom'); } catch (Exception $e) { echo $e->getMessage(); } finally { echo '!'; }", "boom!");
+        t("try { echo 1 % 0; } catch (DivisionByZeroError $e) { echo get_class($e); }", "DivisionByZeroError");
+        t("function f() { try { return 'a'; } finally { echo 'f'; } } echo f();", "fa");
+        t("class E1 extends Exception {} try { throw new E1('x', 3); } catch (RuntimeException | E1 $e) { echo $e->getCode(); }", "3");
+        t("$n = 3; $f = function($x) use ($n) { return $x * $n; }; echo $f(4);", "12");
+        t("$m = 2; $g = fn($x) => $x + $m; echo $g(5), implode(',', array_map(fn($v) => $v * 2, [1, 2, 3]));", "71,2,3".replace("71,2,3", "72,4,6").as_str());
+        t("echo match(2) { 1 => 'a', 2, 3 => 'b', default => 'c' };", "b");
+        t("try { echo match(9) { 1 => 'a' }; } catch (\\UnhandledMatchError $e) { echo $e->getMessage(); }", "Unhandled match case 9");
     }
 
     #[test]

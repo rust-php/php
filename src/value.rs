@@ -1,4 +1,5 @@
 //! Core value model: zval-equivalent `Value`, ordered-hash `PhpArray`, conversions and comparisons.
+use crate::object::Obj;
 use std::{cmp::Ordering, collections::HashMap, rc::Rc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -15,7 +16,7 @@ impl Key {
             Value::Bool(b) => Key::Int(*b as i64),
             Value::Float(f) => Key::Int(*f as i64),
             Value::Null => Key::Str("".into()),
-            Value::Array(_) => return Err("Illegal offset type".into()),
+            Value::Array(_) | Value::Object(_) => return Err("Illegal offset type".into()),
         })
     }
 
@@ -120,6 +121,7 @@ pub enum Value {
     Float(f64),
     Str(Rc<str>),
     Array(Rc<PhpArray>),
+    Object(Rc<Obj>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -253,6 +255,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Str(_) => "string",
             Value::Array(_) => "array",
+            Value::Object(_) => "object",
         }
     }
     pub fn to_bool(&self) -> bool {
@@ -263,6 +266,7 @@ impl Value {
             Value::Float(f) => *f != 0.0,
             Value::Str(s) => !(s.is_empty() || &**s == "0"),
             Value::Array(a) => !a.is_empty(),
+            Value::Object(_) => true,
         }
     }
     pub fn to_int(&self) -> i64 {
@@ -277,6 +281,7 @@ impl Value {
                 None => 0,
             },
             Value::Array(a) => !a.is_empty() as i64,
+            Value::Object(_) => 1,
         }
     }
     pub fn to_float(&self) -> f64 {
@@ -295,6 +300,7 @@ impl Value {
             Value::Int(i) => i.to_string().into(),
             Value::Float(f) => fmt_float(*f, Some(14)).into(),
             Value::Array(_) => "Array".into(),
+            Value::Object(_) => "Object".into(),
         }
     }
 }
@@ -322,7 +328,7 @@ fn num_of(v: &Value, op: &str, other: &Value, left: bool) -> Result<Num, String>
         Value::Int(i) => Ok(Num::I(*i)),
         Value::Float(f) => Ok(Num::F(*f)),
         Value::Str(s) => parse_numeric(s).map(|(n, _)| n).ok_or_else(bad),
-        Value::Array(_) => Err(bad()),
+        Value::Array(_) | Value::Object(_) => Err(bad()),
     }
 }
 
@@ -456,8 +462,17 @@ pub fn loose_cmp(a: &Value, b: &Value) -> Ordering {
             }
             Ordering::Equal
         }
-        (Array(_), _) => Ordering::Greater,
-        (_, Array(_)) => Ordering::Less,
+        (Object(x), Object(y)) => {
+            if Rc::ptr_eq(x, y) {
+                Ordering::Equal
+            } else if Rc::ptr_eq(&x.class, &y.class) {
+                loose_cmp(&Array(Rc::new(x.props.borrow().clone())), &Array(Rc::new(y.props.borrow().clone())))
+            } else {
+                Ordering::Greater
+            }
+        }
+        (Array(_) | Object(_), _) => Ordering::Greater,
+        (_, Array(_) | Object(_)) => Ordering::Less,
     }
 }
 
@@ -478,6 +493,7 @@ pub fn strict_eq(a: &Value, b: &Value) -> bool {
             x.len() == y.len()
                 && x.iter().zip(y.iter()).all(|((k1, v1), (k2, v2))| k1 == k2 && strict_eq(v1, v2))
         }
+        (Object(x), Object(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }

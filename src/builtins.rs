@@ -1,6 +1,7 @@
 //! Built-in functions and constants.
 use crate::value::*;
-use crate::vm::Vm;
+use crate::vm::{Flow, Vm};
+use crate::object::Extra;
 use std::{collections::HashMap, rc::Rc, sync::OnceLock};
 
 type Res = Result<Value, String>;
@@ -243,6 +244,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
                 Value::Float(_) => "double",
                 Value::Str(_) => "string",
                 Value::Array(_) => "array",
+                Value::Object(_) => "object",
             }))),
             ("intval", |_, a| Ok(Value::Int(arg(&a, 0).to_int()))),
             ("floatval", |_, a| Ok(Value::Float(arg(&a, 0).to_float()))),
@@ -448,11 +450,14 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
 }
 
 pub fn exists(name: &str) -> bool {
-    table().contains_key(name)
+    table().contains_key(name) || vm_table().contains_key(name)
 }
 
-pub fn call(vm: &mut Vm<'_>, name: &str, args: Vec<Value>) -> Option<Res> {
-    table().get(name).map(|f| f(vm, args))
+pub fn call(vm: &mut Vm<'_>, name: &str, args: Vec<Value>) -> Option<Result<Value, Flow>> {
+    if let Some(f) = vm_table().get(name) {
+        return Some(f(vm, args));
+    }
+    table().get(name).map(|f| f(vm, args).map_err(Flow::Fatal))
 }
 
 fn num_value(v: &Value) -> Value {
@@ -657,6 +662,23 @@ fn var_dump(v: &Value, ind: usize, out: &mut String) {
         Value::Int(i) => out.push_str(&format!("{pad}int({i})\n")),
         Value::Float(f) => out.push_str(&format!("{pad}float({})\n", fmt_float(*f, None))),
         Value::Str(t) => out.push_str(&format!("{pad}string({}) \"{t}\"\n", t.len())),
+        Value::Object(o) => {
+            let props = o.props.borrow();
+            out.push_str(&format!("{pad}object({})#{} ({}) {{\n", o.class.name, o.id, props.len()));
+            for (k, x) in props.iter() {
+                let label = match k {
+                    Key::Int(i) => format!("[{i}]"),
+                    Key::Str(t) => match o.class.prop_vis(t) {
+                        Some((1, _)) => format!("[\"{t}\":protected]"),
+                        Some((2, c)) => format!("[\"{t}\":\"{c}\":private]"),
+                        _ => format!("[\"{t}\"]"),
+                    },
+                };
+                out.push_str(&format!("{pad}  {label}=>\n"));
+                var_dump(x, ind + 2, out);
+            }
+            out.push_str(&format!("{pad}}}\n"));
+        }
         Value::Array(a) => {
             out.push_str(&format!("{pad}array({}) {{\n", a.len()));
             for (k, x) in a.iter() {
@@ -673,6 +695,24 @@ fn var_dump(v: &Value, ind: usize, out: &mut String) {
 
 fn print_r(v: &Value, ind: usize, out: &mut String) {
     match v {
+        Value::Object(o) => {
+            let pad = " ".repeat(ind);
+            out.push_str(&format!("{} Object\n{pad}(\n", o.class.name));
+            for (k, x) in o.props.borrow().iter() {
+                let key = match k {
+                    Key::Int(i) => i.to_string(),
+                    Key::Str(t) => match o.class.prop_vis(t) {
+                        Some((1, _)) => format!("{t}:protected"),
+                        Some((2, c)) => format!("{t}:{c}:private"),
+                        _ => t.to_string(),
+                    },
+                };
+                out.push_str(&format!("{pad}    [{key}] => "));
+                print_r(x, ind + 8, out);
+                out.push('\n');
+            }
+            out.push_str(&format!("{pad})\n"));
+        }
         Value::Array(a) => {
             let pad = " ".repeat(ind);
             out.push_str(&format!("Array\n{pad}(\n"));
@@ -705,6 +745,18 @@ fn var_export(v: &Value, ind: usize, out: &mut String) {
             }
         }
         Value::Str(t) => out.push_str(&format!("'{}'", t.replace('\\', "\\\\").replace('\'', "\\'"))),
+        Value::Object(o) => {
+            out.push_str(&format!("\\{}::__set_state(array(\n", o.class.name));
+            for (k, x) in o.props.borrow().iter() {
+                match k {
+                    Key::Int(i) => out.push_str(&format!("{pad}   {i} => ")),
+                    Key::Str(t) => out.push_str(&format!("{pad}   '{t}' => ")),
+                }
+                var_export(x, ind + 2, out);
+                out.push_str(",\n");
+            }
+            out.push_str(&format!("{pad}))"));
+        }
         Value::Array(a) => {
             out.push_str("array (\n");
             for (k, x) in a.iter() {
@@ -721,4 +773,204 @@ fn var_export(v: &Value, ind: usize, out: &mut String) {
             out.push_str(&format!("{pad})"));
         }
     }
+}
+
+type VmBuiltin = fn(&mut Vm<'_>, Vec<Value>) -> Result<Value, Flow>;
+
+fn bool_v(b: bool) -> Result<Value, Flow> {
+    Ok(Value::Bool(b))
+}
+
+fn class_name_arg(vm: &Vm<'_>, v: &Value) -> Option<std::rc::Rc<crate::object::Class>> {
+    vm.class_of(v).ok()
+}
+
+fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
+    static T: OnceLock<HashMap<&'static str, VmBuiltin>> = OnceLock::new();
+    T.get_or_init(|| {
+        let list: &[(&str, VmBuiltin)] = &[
+            ("count", |vm, a| match a.first() {
+                Some(Value::Array(x)) => Ok(Value::Int(x.len() as i64)),
+                Some(o @ Value::Object(ob)) if ob.class.find_method("count").is_some() => {
+                    let m = ob.class.find_method("count").unwrap();
+                    Ok(Value::Int(vm.call_method(o, &m, vec![])?.to_int()))
+                }
+                other => vm.throw_error(
+                    "TypeError",
+                    &format!("count(): Argument #1 ($value) must be of type Countable|array, {} given", other.map(Value::type_name).unwrap_or("null")),
+                ),
+            }),
+            ("sizeof", |vm, a| vm_table()["count"](vm, a)),
+            ("call_user_func", |vm, a| {
+                let mut it = a.into_iter();
+                let f = it.next().unwrap_or(Value::Null);
+                vm.call_value(&f, it.collect())
+            }),
+            ("call_user_func_array", |vm, a| {
+                let f = arg(&a, 0);
+                let args = match arg(&a, 1) {
+                    Value::Array(x) => x.iter().map(|(_, v)| v.clone()).collect(),
+                    _ => vec![],
+                };
+                vm.call_value(&f, args)
+            }),
+            ("is_callable", |vm, a| {
+                let ok = match arg(&a, 0) {
+                    Value::Object(o) => matches!(&*o.extra.borrow(), Extra::Closure(_)) || o.class.find_method("__invoke").is_some(),
+                    Value::Str(s) => s.contains("::") || vm.prog.func_index.contains_key(&s.to_ascii_lowercase()) || exists(&s.to_ascii_lowercase()),
+                    Value::Array(x) if x.len() == 2 => match (x.get(&Key::Int(0)), x.get(&Key::Int(1))) {
+                        (Some(c), Some(m)) => class_name_arg(vm, c).is_some_and(|c| c.find_method(&m.to_str().to_ascii_lowercase()).is_some()),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                bool_v(ok)
+            }),
+            ("array_map", |vm, a| {
+                let cb = arg(&a, 0);
+                let first = need_arr(&a, 1, "array_map")?;
+                if a.len() <= 2 {
+                    let mut out = PhpArray::new();
+                    let list_like = first.iter().all(|(k, _)| matches!(k, Key::Int(_)));
+                    for (k, v) in first.iter() {
+                        let r = if matches!(cb, Value::Null) { v.clone() } else { vm.call_value(&cb, vec![v.clone()])? };
+                        if list_like || true {
+                            out.set(k.clone(), r);
+                        }
+                    }
+                    return Ok(Value::Array(Rc::new(out)));
+                }
+                let lists: Vec<Vec<Value>> = (1..a.len()).map(|i| need_arr(&a, i, "array_map").map(|x| x.iter().map(|(_, v)| v.clone()).collect())).collect::<Result<_, _>>()?;
+                let n = lists.iter().map(Vec::len).max().unwrap_or(0);
+                let mut out = vec![];
+                for i in 0..n {
+                    let row: Vec<Value> = lists.iter().map(|l| l.get(i).cloned().unwrap_or(Value::Null)).collect();
+                    out.push(if matches!(cb, Value::Null) { arr(row) } else { vm.call_value(&cb, row)? });
+                }
+                Ok(arr(out))
+            }),
+            ("array_filter", |vm, a| {
+                let src = need_arr(&a, 0, "array_filter")?;
+                let mode = a.get(2).map(Value::to_int).unwrap_or(0);
+                let mut out = PhpArray::new();
+                for (k, v) in src.iter() {
+                    let keep = match a.get(1) {
+                        None | Some(Value::Null) => v.to_bool(),
+                        Some(cb) => {
+                            let args = match mode {
+                                2 => vec![k.to_value()],
+                                1 => vec![v.clone(), k.to_value()],
+                                _ => vec![v.clone()],
+                            };
+                            vm.call_value(cb, args)?.to_bool()
+                        }
+                    };
+                    if keep {
+                        out.set(k.clone(), v.clone());
+                    }
+                }
+                Ok(Value::Array(Rc::new(out)))
+            }),
+            ("array_reduce", |vm, a| {
+                let src = need_arr(&a, 0, "array_reduce")?;
+                let cb = arg(&a, 1);
+                let mut acc = arg(&a, 2);
+                for (_, v) in src.iter() {
+                    acc = vm.call_value(&cb, vec![acc, v.clone()])?;
+                }
+                Ok(acc)
+            }),
+            ("iterator_to_array", |vm, a| {
+                let keep = a.get(1).map(Value::to_bool).unwrap_or(true);
+                let src = arg(&a, 0);
+                if let Value::Array(_) = src {
+                    return Ok(src);
+                }
+                let mut it = src;
+                while matches!(&it, Value::Object(o) if o.class.is_a("iteratoraggregate")) {
+                    it = vm.call_method_named(&it, "getIterator", vec![])?;
+                }
+                let mut out = PhpArray::new();
+                vm.call_method_named(&it, "rewind", vec![])?;
+                while vm.call_method_named(&it, "valid", vec![])?.to_bool() {
+                    let v = vm.call_method_named(&it, "current", vec![])?;
+                    if keep {
+                        let k = vm.call_method_named(&it, "key", vec![])?;
+                        out.set(Key::from_value(&k)?, v);
+                    } else {
+                        out.push(v);
+                    }
+                    vm.call_method_named(&it, "next", vec![])?;
+                }
+                Ok(Value::Array(Rc::new(out)))
+            }),
+            ("is_object", |_, a| bool_v(matches!(arg(&a, 0), Value::Object(_)))),
+            ("get_class", |vm, a| match arg(&a, 0) {
+                Value::Object(o) => Ok(s(&o.class.name)),
+                _ => vm.throw_error("TypeError", "get_class(): Argument #1 ($object) must be of type object"),
+            }),
+            ("get_parent_class", |vm, a| {
+                Ok(class_name_arg(vm, &arg(&a, 0)).and_then(|c| c.parent.clone()).map(|p| s(&p.name)).unwrap_or(Value::Bool(false)))
+            }),
+            ("method_exists", |vm, a| {
+                bool_v(class_name_arg(vm, &arg(&a, 0)).is_some_and(|c| c.find_method(&arg(&a, 1).to_str().to_ascii_lowercase()).is_some()))
+            }),
+            ("property_exists", |vm, a| {
+                let name = arg(&a, 1).to_str();
+                if let Value::Object(o) = arg(&a, 0) {
+                    if o.props.borrow().get(&Key::from_str(&name)).is_some() {
+                        return bool_v(true);
+                    }
+                }
+                bool_v(class_name_arg(vm, &arg(&a, 0)).is_some_and(|c| c.props.iter().any(|p| *p.name == *name) || c.static_thunks.iter().any(|(n, _)| **n == *name)))
+            }),
+            ("class_exists", |vm, a| bool_v(vm.classes.get(&arg(&a, 0).to_str().to_ascii_lowercase()).is_some_and(|c| c.kind == crate::ast::ClassKind::Class))),
+            ("interface_exists", |vm, a| bool_v(vm.classes.get(&arg(&a, 0).to_str().to_ascii_lowercase()).is_some_and(|c| c.kind == crate::ast::ClassKind::Interface))),
+            ("is_a", |vm, a| {
+                let target = arg(&a, 1).to_str().to_ascii_lowercase();
+                let ok = match arg(&a, 0) {
+                    Value::Object(o) => o.class.is_a(&target),
+                    Value::Str(_) if a.get(2).is_some_and(Value::to_bool) => class_name_arg(vm, &arg(&a, 0)).is_some_and(|c| c.is_a(&target)),
+                    _ => false,
+                };
+                bool_v(ok)
+            }),
+            ("is_subclass_of", |vm, a| {
+                let target = arg(&a, 1).to_str().to_ascii_lowercase();
+                bool_v(class_name_arg(vm, &arg(&a, 0)).is_some_and(|c| !c.name.eq_ignore_ascii_case(&target) && c.is_a(&target)))
+            }),
+            ("spl_object_id", |_, a| match arg(&a, 0) {
+                Value::Object(o) => Ok(Value::Int(o.id as i64)),
+                _ => Ok(Value::Int(0)),
+            }),
+            ("spl_object_hash", |_, a| match arg(&a, 0) {
+                Value::Object(o) => Ok(s(&format!("{:032x}", o.id))),
+                _ => Ok(s("")),
+            }),
+            ("get_object_vars", |_, a| match arg(&a, 0) {
+                Value::Object(o) => Ok(Value::Array(Rc::new(o.props.borrow().clone()))),
+                _ => Ok(Value::Null),
+            }),
+            ("define", |vm, a| {
+                vm.constants.insert(arg(&a, 0).to_str().to_string(), arg(&a, 1));
+                bool_v(true)
+            }),
+            ("defined", |vm, a| {
+                let n = arg(&a, 0).to_str();
+                bool_v(vm.constants.contains_key(&*n) || constant(&n).is_some())
+            }),
+            ("constant", |vm, a| {
+                let n = arg(&a, 0).to_str();
+                if let Some((c, k)) = n.split_once("::") {
+                    let class = vm.find_class(c)?;
+                    return vm.class_const_pub(&class, k);
+                }
+                match vm.constants.get(&*n).cloned().or_else(|| constant(&n)) {
+                    Some(v) => Ok(v),
+                    None => vm.throw_error("Error", &format!("Undefined constant \"{n}\"")),
+                }
+            }),
+        ];
+        list.iter().copied().collect()
+    })
 }

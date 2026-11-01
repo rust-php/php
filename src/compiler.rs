@@ -2,7 +2,7 @@
 use crate::ast::*;
 use crate::builtins;
 use crate::value::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type R<T> = Result<T, String>;
 
@@ -29,6 +29,7 @@ pub enum Op {
     JmpZKeep(u32),
     JmpNZKeep(u32),
     JmpNotNullKeep(u32),
+    JmpNullKeep(u32),
     NewArray,
     ArrPush,
     ArrSet,
@@ -38,11 +39,42 @@ pub enum Op {
     IncDec(u16, bool, bool), // slot, inc, prefix
     IterNext { arr: u16, pos: u16, key: u16, val: u16, exit: u32 },
     Call(u32, u8),
+    CallValue(u8),
     Ret,
     Exit,
     Fatal(u32),
     SkipIfArg(u8, u32),
     Halt,
+    // Classes and objects. Class designators are strings or objects on the stack.
+    PushSelf,
+    PushParent,
+    PushStatic,
+    New(u8),
+    GetProp,
+    AssignProp,
+    AssignPropDim(u32),
+    CallMethod(u8),
+    CallStatic(u8, bool),
+    ClassConst,
+    GetStatic,
+    AssignStatic,
+    AssignStaticDim(u32),
+    InstanceOf,
+    Clone,
+    MakeClosure(u32, u8),
+    // Exceptions and constants.
+    Throw,
+    JmpIfInstance(u32, u32),
+    MatchError,
+    ConstGet(u32),
+    DefConst(u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Handler {
+    pub start: usize,
+    pub end: usize,
+    pub target: usize,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +83,38 @@ pub struct Func {
     pub nparams: usize,
     pub nlocals: usize,
     pub code: Vec<Op>,
+    pub handlers: Vec<Handler>,
+    pub capture_slots: Vec<u16>,
+}
+
+#[derive(Debug)]
+pub struct MethodDef {
+    pub name: String,
+    pub func: usize,
+    pub is_static: bool,
+    pub is_abstract: bool,
+    pub vis: u8,
+}
+
+#[derive(Debug)]
+pub struct PropDef {
+    pub name: String,
+    pub thunk: Option<usize>,
+    pub is_static: bool,
+    pub vis: u8,
+}
+
+#[derive(Debug)]
+pub struct ClassDef {
+    pub name: String,
+    pub kind: ClassKind,
+    pub is_abstract: bool,
+    pub parent: Option<String>,
+    pub interfaces: Vec<String>,
+    pub traits: Vec<String>,
+    pub consts: Vec<(String, usize)>,
+    pub props: Vec<PropDef>,
+    pub methods: Vec<MethodDef>,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +123,7 @@ pub struct Program {
     pub shapes: Vec<Vec<bool>>,
     pub funcs: Vec<Func>,
     pub func_index: HashMap<String, usize>,
+    pub classes: Vec<ClassDef>,
     pub main: Func,
 }
 
@@ -73,18 +138,115 @@ struct Fc<'a> {
     code: Vec<Op>,
     locals: HashMap<String, u16>,
     loops: Vec<LoopCtx>,
+    /// Active `finally` blocks with the loop depth at which their `try` began.
+    finallys: Vec<(Vec<Stmt>, usize)>,
+    handlers: Vec<Handler>,
+}
+
+fn new_fc(prog: &mut Program) -> Fc<'_> {
+    let mut fc = Fc { prog, code: vec![], locals: HashMap::new(), loops: vec![], finallys: vec![], handlers: vec![] };
+    fc.slot("this");
+    fc
 }
 
 pub fn compile(stmts: &[Stmt]) -> R<Program> {
     let mut prog = Program::default();
-    let mut fc = Fc { prog: &mut prog, code: vec![], locals: HashMap::new(), loops: vec![] };
+    let mut fc = new_fc(&mut prog);
     for s in stmts {
         fc.stmt(s)?;
     }
     fc.code.push(Op::Halt);
-    let (code, nlocals) = (std::mem::take(&mut fc.code), fc.locals.len());
-    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code };
+    let (code, nlocals, handlers) = (std::mem::take(&mut fc.code), fc.locals.len(), std::mem::take(&mut fc.handlers));
+    prog.main = Func { name: "{main}".into(), nparams: 0, nlocals, code, handlers, capture_slots: vec![] };
     Ok(prog)
+}
+
+fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
+    let all = |xs: &[Expr], out: &mut HashSet<String>| xs.iter().for_each(|x| expr_vars(x, out));
+    match e {
+        Expr::Var(n) => {
+            out.insert(n.clone());
+        }
+        Expr::Array(items) => items.iter().for_each(|(k, v)| {
+            if let Some(k) = k {
+                expr_vars(k, out);
+            }
+            expr_vars(v, out);
+        }),
+        Expr::Index(b, k) => {
+            expr_vars(b, out);
+            if let Some(k) = k {
+                expr_vars(k, out);
+            }
+        }
+        Expr::Assign(a, b) | Expr::AssignOp(_, a, b) | Expr::Bin(_, a, b) => {
+            expr_vars(a, out);
+            expr_vars(b, out);
+        }
+        Expr::IncDec { target, .. } => expr_vars(target, out),
+        Expr::Unary(_, a) | Expr::Cast(_, a) | Expr::Empty(a) | Expr::Print(a) | Expr::Clone(a) | Expr::Throw(a) => expr_vars(a, out),
+        Expr::Ternary(a, b, c) => {
+            expr_vars(a, out);
+            if let Some(b) = b {
+                expr_vars(b, out);
+            }
+            expr_vars(c, out);
+        }
+        Expr::Call(_, args) | Expr::Isset(args) => all(args, out),
+        Expr::CallExpr(c, args) => {
+            expr_vars(c, out);
+            all(args, out);
+        }
+        Expr::New(c, args) | Expr::StaticCall(c, _, args) => {
+            if let ClassRef::Dyn(d) = c {
+                expr_vars(d, out);
+            }
+            all(args, out);
+        }
+        Expr::Prop { obj, name, .. } => {
+            expr_vars(obj, out);
+            expr_vars(name, out);
+        }
+        Expr::MethodCall { obj, name, args, .. } => {
+            expr_vars(obj, out);
+            expr_vars(name, out);
+            all(args, out);
+        }
+        Expr::StaticProp(c, _) | Expr::ClassConst(c, _) => {
+            if let ClassRef::Dyn(d) = c {
+                expr_vars(d, out);
+            }
+        }
+        Expr::Instanceof(a, c) => {
+            expr_vars(a, out);
+            if let ClassRef::Dyn(d) = c {
+                expr_vars(d, out);
+            }
+        }
+        Expr::Closure(c) => {
+            // A nested arrow function sees the enclosing scope through us.
+            if c.arrow {
+                for s in &c.func.body {
+                    if let Stmt::Return(Some(e)) = s {
+                        expr_vars(e, out);
+                    }
+                }
+            }
+            out.extend(c.uses.iter().cloned());
+        }
+        Expr::Exit(Some(a)) => expr_vars(a, out),
+        Expr::Match(s, arms, d) => {
+            expr_vars(s, out);
+            for (conds, r) in arms {
+                all(conds, out);
+                expr_vars(r, out);
+            }
+            if let Some(d) = d {
+                expr_vars(d, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl Fc<'_> {
@@ -105,8 +267,10 @@ impl Fc<'_> {
             Op::JmpZKeep(_) => Op::JmpZKeep(target),
             Op::JmpNZKeep(_) => Op::JmpNZKeep(target),
             Op::JmpNotNullKeep(_) => Op::JmpNotNullKeep(target),
+            Op::JmpNullKeep(_) => Op::JmpNullKeep(target),
             Op::IterNext { arr, pos, key, val, .. } => Op::IterNext { arr, pos, key, val, exit: target },
             Op::SkipIfArg(i, _) => Op::SkipIfArg(i, target),
+            Op::JmpIfInstance(k, _) => Op::JmpIfInstance(k, target),
             op => op,
         };
     }
@@ -133,6 +297,10 @@ impl Fc<'_> {
 
     fn block(&mut self, stmts: &[Stmt]) -> R<()> {
         stmts.iter().try_for_each(|s| self.stmt(s))
+    }
+
+    fn new_loop(&mut self, is_switch: bool) {
+        self.loops.push(LoopCtx { breaks: vec![], continues: vec![], is_switch });
     }
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
@@ -172,7 +340,7 @@ impl Fc<'_> {
                 let top = self.here();
                 self.expr(cond)?;
                 let exit = self.emit(Op::JmpZ(0));
-                self.loops.push(LoopCtx { breaks: vec![], continues: vec![], is_switch: false });
+                self.new_loop(false);
                 self.block(body)?;
                 self.emit(Op::Jmp(top));
                 let end = self.here();
@@ -181,7 +349,7 @@ impl Fc<'_> {
             }
             Stmt::DoWhile(body, cond) => {
                 let top = self.here();
-                self.loops.push(LoopCtx { breaks: vec![], continues: vec![], is_switch: false });
+                self.new_loop(false);
                 self.block(body)?;
                 let test = self.here();
                 self.expr(cond)?;
@@ -205,7 +373,7 @@ impl Fc<'_> {
                 if !cond.is_empty() {
                     exits.push(self.emit(Op::JmpZ(0)));
                 }
-                self.loops.push(LoopCtx { breaks: vec![], continues: vec![], is_switch: false });
+                self.new_loop(false);
                 self.block(body)?;
                 let cont = self.here();
                 for e in step {
@@ -229,7 +397,7 @@ impl Fc<'_> {
                 let kslot = key.as_ref().map(|k| self.slot(k)).unwrap_or(NO_SLOT);
                 let vslot = self.slot(val);
                 let top = self.emit(Op::IterNext { arr, pos, key: kslot, val: vslot, exit: 0 });
-                self.loops.push(LoopCtx { breaks: vec![], continues: vec![], is_switch: false });
+                self.new_loop(false);
                 self.block(body)?;
                 self.emit(Op::Jmp(top as u32));
                 let end = self.here();
@@ -253,7 +421,7 @@ impl Fc<'_> {
                     }
                 }
                 let to_default = self.emit(Op::Jmp(0));
-                self.loops.push(LoopCtx { breaks: vec![], continues: vec![], is_switch: true });
+                self.new_loop(true);
                 let mut default_at = None;
                 for (i, (label, body)) in cases.iter().enumerate() {
                     let h = self.here();
@@ -277,8 +445,9 @@ impl Fc<'_> {
                     let k = self.konst(Value::str(&m));
                     self.emit(Op::Fatal(k));
                 } else {
-                    let at = self.emit(Op::Jmp(0));
                     let idx = self.loops.len() - n;
+                    self.run_finallys(|depth| depth > idx)?;
+                    let at = self.emit(Op::Jmp(0));
                     let l = &mut self.loops[idx];
                     if is_break || l.is_switch {
                         l.breaks.push(at);
@@ -292,6 +461,13 @@ impl Fc<'_> {
                     Some(e) => self.expr(e)?,
                     None => self.push_const(Value::Null),
                 }
+                if !self.finallys.is_empty() {
+                    let tmp = self.hidden();
+                    self.emit(Op::Store(tmp));
+                    self.emit(Op::Pop);
+                    self.run_finallys(|_| true)?;
+                    self.emit(Op::Load(tmp));
+                }
                 self.emit(Op::Ret);
             }
             Stmt::Unset(targets) => {
@@ -304,7 +480,8 @@ impl Fc<'_> {
                             self.emit(Op::Pop);
                         }
                         Expr::Index(..) => {
-                            let (name, dims) = flatten(t)?;
+                            let (base, dims) = flatten(t)?;
+                            let Base::Var(name) = base else { return Err("Cannot unset this array element".into()) };
                             let slot = self.slot(&name);
                             let mut shape = vec![];
                             for d in dims {
@@ -319,12 +496,124 @@ impl Fc<'_> {
                             let si = self.shape(shape);
                             self.emit(Op::UnsetDim(slot, si));
                         }
+                        Expr::Prop { .. } => {
+                            self.assign(t, |c| {
+                                c.push_const(Value::Null);
+                                Ok(())
+                            })?;
+                            self.emit(Op::Pop);
+                        }
                         _ => return Err("Cannot unset expression".into()),
                     }
                 }
             }
-            Stmt::Func(f) => self.func(f)?,
+            Stmt::Func(f) => {
+                let lname = f.name.to_ascii_lowercase();
+                if self.prog.func_index.contains_key(&lname) || builtins::exists(&lname) {
+                    return Err(format!("Cannot redeclare {}()", f.name));
+                }
+                let idx = self.compile_function(f, &[])?;
+                self.prog.func_index.insert(lname, idx);
+            }
+            Stmt::Class(c) => self.class(c)?,
+            Stmt::DefConst(name, e) => {
+                self.expr(e)?;
+                let k = self.konst(Value::str(name));
+                self.emit(Op::DefConst(k));
+            }
+            Stmt::Try { body, catches, finally } => self.try_stmt(body, catches, finally.as_deref())?,
         }
+        Ok(())
+    }
+
+    /// Emit inline copies of pending `finally` blocks whose try began at a loop depth matching `pred`.
+    fn run_finallys(&mut self, pred: impl Fn(usize) -> bool) -> R<()> {
+        let saved = self.finallys.clone();
+        for i in (0..saved.len()).rev() {
+            if pred(saved[i].1) {
+                self.finallys.truncate(i);
+                self.block(&saved[i].0)?;
+            }
+        }
+        self.finallys = saved;
+        Ok(())
+    }
+
+    fn inline_finally(&mut self, finally: Option<&[Stmt]>) -> R<()> {
+        if let Some(f) = finally {
+            let saved = self.finallys.pop();
+            let r = self.block(f);
+            self.finallys.extend(saved);
+            r?;
+        }
+        Ok(())
+    }
+
+    fn try_stmt(&mut self, body: &[Stmt], catches: &[CatchClause], finally: Option<&[Stmt]>) -> R<()> {
+        if let Some(f) = finally {
+            self.finallys.push((f.to_vec(), self.loops.len()));
+        }
+        let start = self.code.len();
+        self.block(body)?;
+        let end_body = self.code.len();
+        let mut segments = vec![(start, end_body)];
+        let mut ends = vec![];
+        self.inline_finally(finally)?;
+        ends.push(self.emit(Op::Jmp(0)));
+        let mut catch_handler = None;
+        if !catches.is_empty() {
+            let target = self.code.len();
+            catch_handler = Some(Handler { start, end: end_body, target });
+            let mut seg_start = self.code.len();
+            for c in catches {
+                let mut body_jumps = vec![];
+                for cls in &c.classes {
+                    let k = self.konst(Value::str(&cls.to_ascii_lowercase()));
+                    body_jumps.push(self.emit(Op::JmpIfInstance(k, 0)));
+                }
+                let next = self.emit(Op::Jmp(0));
+                let h = self.here();
+                body_jumps.into_iter().for_each(|j| self.patch(j, h));
+                match &c.var {
+                    Some(v) => {
+                        let s = self.slot(v);
+                        self.emit(Op::Store(s));
+                        self.emit(Op::Pop);
+                    }
+                    None => {
+                        self.emit(Op::Pop);
+                    }
+                }
+                self.block(&c.body)?;
+                segments.push((seg_start, self.code.len()));
+                self.inline_finally(finally)?;
+                ends.push(self.emit(Op::Jmp(0)));
+                let h = self.here();
+                self.patch(next, h);
+                seg_start = self.code.len();
+            }
+            // No clause matched: rethrow (still protected by the finally handler).
+            self.emit(Op::Throw);
+            segments.push((seg_start, self.code.len()));
+        }
+        if let Some(h) = catch_handler {
+            self.handlers.push(h);
+        }
+        if let Some(f) = finally {
+            let target = self.code.len();
+            for (a, b) in segments {
+                self.handlers.push(Handler { start: a, end: b, target });
+            }
+            self.finallys.pop();
+            let tmp = self.hidden();
+            self.emit(Op::Store(tmp));
+            self.emit(Op::Pop);
+            self.block(f)?;
+            self.emit(Op::Load(tmp));
+            self.emit(Op::Throw);
+        }
+        let h = self.here();
+        ends.into_iter().for_each(|e| self.patch(e, h));
         Ok(())
     }
 
@@ -339,15 +628,13 @@ impl Fc<'_> {
         l.continues.into_iter().for_each(|c| self.patch(c, cont_target));
     }
 
-    fn func(&mut self, f: &FuncDecl) -> R<()> {
-        let lname = f.name.to_ascii_lowercase();
-        if self.prog.func_index.contains_key(&lname) || builtins::exists(&lname) {
-            return Err(format!("Cannot redeclare {}()", f.name));
-        }
-        let mut sub = Fc { prog: &mut *self.prog, code: vec![], locals: HashMap::new(), loops: vec![] };
+    /// Compile a function body into `prog.funcs`; slot 0 is `$this`, parameters follow, then captures.
+    fn compile_function(&mut self, f: &FuncDecl, uses: &[String]) -> R<usize> {
+        let mut sub = new_fc(&mut *self.prog);
         for p in &f.params {
             sub.slot(&p.name);
         }
+        let capture_slots: Vec<u16> = uses.iter().map(|u| sub.slot(u)).collect();
         for (i, p) in f.params.iter().enumerate() {
             if let Some(d) = &p.default {
                 let skip = sub.emit(Op::SkipIfArg(i as u8, 0));
@@ -362,11 +649,94 @@ impl Fc<'_> {
         sub.block(&f.body)?;
         sub.push_const(Value::Null);
         sub.emit(Op::Ret);
-        let (code, nlocals) = (std::mem::take(&mut sub.code), sub.locals.len());
+        let (code, nlocals, handlers) = (std::mem::take(&mut sub.code), sub.locals.len(), std::mem::take(&mut sub.handlers));
         let idx = self.prog.funcs.len();
-        self.prog.funcs.push(Func { name: f.name.clone(), nparams: f.params.len(), nlocals, code });
-        self.prog.func_index.insert(lname, idx);
+        self.prog.funcs.push(Func { name: f.name.clone(), nparams: f.params.len(), nlocals, code, handlers, capture_slots });
+        Ok(idx)
+    }
+
+    fn thunk(&mut self, e: &Expr) -> R<usize> {
+        let f = FuncDecl { name: "{thunk}".into(), params: vec![], body: vec![Stmt::Return(Some(e.clone()))] };
+        self.compile_function(&f, &[])
+    }
+
+    fn class(&mut self, c: &ClassDecl) -> R<()> {
+        let mut def = ClassDef {
+            name: c.name.clone(),
+            kind: c.kind,
+            is_abstract: c.is_abstract,
+            parent: c.parent.clone(),
+            interfaces: c.interfaces.clone(),
+            traits: c.traits.clone(),
+            consts: vec![],
+            props: vec![],
+            methods: vec![],
+        };
+        for (n, e) in &c.consts {
+            let t = self.thunk(e)?;
+            def.consts.push((n.clone(), t));
+        }
+        for p in &c.props {
+            let thunk = match &p.default {
+                Some(e) => Some(self.thunk(e)?),
+                None => None,
+            };
+            def.props.push(PropDef { name: p.name.clone(), thunk, is_static: p.is_static, vis: p.vis });
+        }
+        for m in &c.methods {
+            let mut func = m.func.clone();
+            if func.name.eq_ignore_ascii_case("__construct") {
+                let mut prefix = vec![];
+                for p in func.params.iter().filter(|p| p.promote) {
+                    def.props.push(PropDef { name: p.name.clone(), thunk: None, is_static: false, vis: 0 });
+                    prefix.push(Stmt::Expr(Expr::Assign(
+                        Box::new(Expr::Prop { obj: Box::new(Expr::Var("this".into())), name: Box::new(Expr::Str(p.name.clone())), nullsafe: false }),
+                        Box::new(Expr::Var(p.name.clone())),
+                    )));
+                }
+                prefix.extend(std::mem::take(&mut func.body));
+                func.body = prefix;
+            }
+            let idx = self.compile_function(&func, &[])?;
+            def.methods.push(MethodDef { name: m.func.name.clone(), func: idx, is_static: m.is_static, is_abstract: m.is_abstract, vis: m.vis });
+        }
+        self.prog.classes.push(def);
         Ok(())
+    }
+
+    /// Push a class designator; returns true for `self` / `parent` / `static` (forwarding calls).
+    fn class_ref(&mut self, c: &ClassRef) -> R<bool> {
+        Ok(match c {
+            ClassRef::Named(n) => match n.to_ascii_lowercase().as_str() {
+                "self" => {
+                    self.emit(Op::PushSelf);
+                    true
+                }
+                "parent" => {
+                    self.emit(Op::PushParent);
+                    true
+                }
+                "static" => {
+                    self.emit(Op::PushStatic);
+                    true
+                }
+                _ => {
+                    self.push_const(Value::str(n));
+                    false
+                }
+            },
+            ClassRef::Dyn(e) => {
+                self.expr(e)?;
+                false
+            }
+        })
+    }
+
+    fn args(&mut self, args: &[Expr]) -> R<u8> {
+        for a in args {
+            self.expr(a)?;
+        }
+        Ok(args.len() as u8)
     }
 
     fn expr(&mut self, e: &Expr) -> R<()> {
@@ -402,13 +772,8 @@ impl Fc<'_> {
             Expr::Index(_, None) => return Err("Cannot use [] for reading".into()),
             Expr::Assign(target, rhs) => self.assign(target, |c| c.expr(rhs))?,
             Expr::AssignOp(op, target, rhs) => {
-                if *op == "??" {
-                    let combined = Expr::Bin("??", target.clone(), rhs.clone());
-                    self.assign(target, |c| c.expr(&combined))?;
-                } else {
-                    let combined = Expr::Bin(op, target.clone(), rhs.clone());
-                    self.assign(target, |c| c.expr(&combined))?;
-                }
+                let combined = Expr::Bin(op, target.clone(), rhs.clone());
+                self.assign(target, |c| c.expr(&combined))?;
             }
             Expr::IncDec { target, inc, prefix } => match &**target {
                 Expr::Var(n) => {
@@ -482,11 +847,14 @@ impl Fc<'_> {
                 }
             }
             Expr::Call(name, args) => {
-                for a in args {
-                    self.expr(a)?;
-                }
+                let n = self.args(args)?;
                 let k = self.konst(Value::str(&name.to_ascii_lowercase()));
-                self.emit(Op::Call(k, args.len() as u8));
+                self.emit(Op::Call(k, n));
+            }
+            Expr::CallExpr(callee, args) => {
+                self.expr(callee)?;
+                let n = self.args(args)?;
+                self.emit(Op::CallValue(n));
             }
             Expr::Isset(items) => {
                 let mut jumps = vec![];
@@ -512,9 +880,8 @@ impl Fc<'_> {
                 _ => match builtins::constant(name) {
                     Some(v) => self.push_const(v),
                     None => {
-                        let k = self.konst(Value::str(&format!("Undefined constant \"{name}\"")));
-                        self.emit(Op::Fatal(k));
-                        self.push_const(Value::Null);
+                        let k = self.konst(Value::str(name));
+                        self.emit(Op::ConstGet(k));
                     }
                 },
             },
@@ -531,43 +898,186 @@ impl Fc<'_> {
                 self.emit(Op::Exit);
                 self.push_const(Value::Null);
             }
+            Expr::New(c, args) => {
+                self.class_ref(c)?;
+                let n = self.args(args)?;
+                self.emit(Op::New(n));
+            }
+            Expr::Prop { obj, name, nullsafe } => {
+                self.expr(obj)?;
+                let j = nullsafe.then(|| self.emit(Op::JmpNullKeep(0)));
+                self.expr(name)?;
+                self.emit(Op::GetProp);
+                if let Some(j) = j {
+                    let h = self.here();
+                    self.patch(j, h);
+                }
+            }
+            Expr::MethodCall { obj, name, args, nullsafe } => {
+                self.expr(obj)?;
+                let j = nullsafe.then(|| self.emit(Op::JmpNullKeep(0)));
+                self.expr(name)?;
+                let n = self.args(args)?;
+                self.emit(Op::CallMethod(n));
+                if let Some(j) = j {
+                    let h = self.here();
+                    self.patch(j, h);
+                }
+            }
+            Expr::StaticCall(c, name, args) => {
+                let forward = self.class_ref(c)?;
+                self.push_const(Value::str(name));
+                let n = self.args(args)?;
+                self.emit(Op::CallStatic(n, forward));
+            }
+            Expr::StaticProp(c, name) => {
+                self.class_ref(c)?;
+                self.push_const(Value::str(name));
+                self.emit(Op::GetStatic);
+            }
+            Expr::ClassConst(c, name) => {
+                self.class_ref(c)?;
+                self.push_const(Value::str(name));
+                self.emit(Op::ClassConst);
+            }
+            Expr::Instanceof(v, c) => {
+                self.expr(v)?;
+                self.class_ref(c)?;
+                self.emit(Op::InstanceOf);
+            }
+            Expr::Clone(x) => {
+                self.expr(x)?;
+                self.emit(Op::Clone);
+            }
+            Expr::Throw(x) => {
+                self.expr(x)?;
+                self.emit(Op::Throw);
+                self.push_const(Value::Null);
+            }
+            Expr::Closure(c) => {
+                let uses: Vec<String> = if c.arrow {
+                    let mut vars = HashSet::new();
+                    for s in &c.func.body {
+                        if let Stmt::Return(Some(e)) = s {
+                            expr_vars(e, &mut vars);
+                        }
+                    }
+                    let params: HashSet<&str> = c.func.params.iter().map(|p| p.name.as_str()).collect();
+                    let mut v: Vec<String> = vars.into_iter().filter(|n| n != "this" && !params.contains(n.as_str()) && self.locals.contains_key(n)).collect();
+                    v.sort();
+                    v
+                } else {
+                    c.uses.clone()
+                };
+                let idx = self.compile_function(&c.func, &uses)?;
+                for u in &uses {
+                    let s = self.slot(u);
+                    self.emit(Op::Load(s));
+                }
+                self.emit(Op::MakeClosure(idx as u32, uses.len() as u8));
+            }
+            Expr::Match(subject, arms, default) => {
+                let tmp = self.hidden();
+                self.expr(subject)?;
+                self.emit(Op::Store(tmp));
+                self.emit(Op::Pop);
+                let mut arm_jumps: Vec<Vec<usize>> = vec![];
+                for (conds, _) in arms {
+                    let mut js = vec![];
+                    for c in conds {
+                        self.emit(Op::Load(tmp));
+                        self.expr(c)?;
+                        self.emit(Op::Bin("==="));
+                        js.push(self.emit(Op::JmpNZ(0)));
+                    }
+                    arm_jumps.push(js);
+                }
+                match default {
+                    Some(d) => self.expr(d)?,
+                    None => {
+                        self.emit(Op::Load(tmp));
+                        self.emit(Op::MatchError);
+                        self.push_const(Value::Null);
+                    }
+                }
+                let mut ends = vec![self.emit(Op::Jmp(0))];
+                for ((_, result), js) in arms.iter().zip(arm_jumps) {
+                    let h = self.here();
+                    js.into_iter().for_each(|j| self.patch(j, h));
+                    self.expr(result)?;
+                    ends.push(self.emit(Op::Jmp(0)));
+                }
+                let h = self.here();
+                ends.into_iter().for_each(|e| self.patch(e, h));
+            }
         }
         Ok(())
     }
 
     /// Compile an assignment whose value is produced by `rhs`; leaves the assigned value on the stack.
     fn assign(&mut self, target: &Expr, rhs: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
-        match target {
-            Expr::Var(n) => {
-                rhs(self)?;
-                let s = self.slot(n);
-                self.emit(Op::Store(s));
-            }
-            Expr::Index(..) => {
-                let (name, dims) = flatten(target)?;
-                let slot = self.slot(&name);
-                let mut shape = vec![];
-                for d in dims {
-                    match d {
-                        Some(k) => {
-                            self.expr(k)?;
-                            shape.push(true);
-                        }
-                        None => shape.push(false),
-                    }
+        let (base, dims) = flatten(target)?;
+        let has_dims = !dims.is_empty();
+        let shape_of = |dims: &[Option<&Expr>]| dims.iter().map(|d| d.is_some()).collect::<Vec<bool>>();
+        match base {
+            Base::Var(n) => {
+                let slot = self.slot(&n);
+                if !has_dims {
+                    rhs(self)?;
+                    self.emit(Op::Store(slot));
+                    return Ok(());
                 }
+                self.keys(&dims)?;
                 rhs(self)?;
-                let si = self.shape(shape);
+                let si = self.shape(shape_of(&dims));
                 self.emit(Op::AssignDim(slot, si));
             }
-            _ => return Err("Cannot assign to this expression".into()),
+            Base::Prop(obj, name) => {
+                self.expr(obj)?;
+                self.expr(name)?;
+                if !has_dims {
+                    rhs(self)?;
+                    self.emit(Op::AssignProp);
+                    return Ok(());
+                }
+                self.keys(&dims)?;
+                rhs(self)?;
+                let si = self.shape(shape_of(&dims));
+                self.emit(Op::AssignPropDim(si));
+            }
+            Base::Static(c, name) => {
+                self.class_ref(c)?;
+                self.push_const(Value::str(name));
+                if !has_dims {
+                    rhs(self)?;
+                    self.emit(Op::AssignStatic);
+                    return Ok(());
+                }
+                self.keys(&dims)?;
+                rhs(self)?;
+                let si = self.shape(shape_of(&dims));
+                self.emit(Op::AssignStaticDim(si));
+            }
+        }
+        Ok(())
+    }
+
+    fn keys(&mut self, dims: &[Option<&Expr>]) -> R<()> {
+        for k in dims.iter().flatten() {
+            self.expr(k)?;
         }
         Ok(())
     }
 }
 
-/// `$a[1][] ...` -> ("a", [Some(1), None])
-fn flatten(e: &Expr) -> R<(String, Vec<Option<&Expr>>)> {
+enum Base<'a> {
+    Var(String),
+    Prop(&'a Expr, &'a Expr),
+    Static(&'a ClassRef, &'a str),
+}
+
+/// `$a[1][] ...` -> (Var a, [Some(1), None]); `$o->p[1]` -> (Prop o p, [Some(1)])
+fn flatten(e: &Expr) -> R<(Base<'_>, Vec<Option<&Expr>>)> {
     let mut dims = vec![];
     let mut cur = e;
     loop {
@@ -578,9 +1088,17 @@ fn flatten(e: &Expr) -> R<(String, Vec<Option<&Expr>>)> {
             }
             Expr::Var(n) => {
                 dims.reverse();
-                return Ok((n.clone(), dims));
+                return Ok((Base::Var(n.clone()), dims));
             }
-            _ => return Err("Cannot write to this array expression".into()),
+            Expr::Prop { obj, name, .. } => {
+                dims.reverse();
+                return Ok((Base::Prop(obj, name), dims));
+            }
+            Expr::StaticProp(c, n) => {
+                dims.reverse();
+                return Ok((Base::Static(c, n), dims));
+            }
+            _ => return Err("Cannot write to this expression".into()),
         }
     }
 }
