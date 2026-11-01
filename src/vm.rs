@@ -35,6 +35,8 @@ pub struct CallCtx {
 }
 
 pub(crate) struct Frame {
+    /// All actual arguments as passed (for func_get_args).
+    all_args: Vec<Value>,
     dyn_vars: HashMap<String, Value>,
     undef_mask: u64,
     locals: Vec<Value>,
@@ -513,6 +515,7 @@ impl<'p> Vm<'p> {
         }
         let argc = args.len();
         let mut undef_mask = 0u64;
+        let all_args = args.clone();
         let mut it = args.into_iter();
         for i in 0..f.nparams {
             let by_ref = f.ref_params.get(i).copied().unwrap_or(false);
@@ -542,7 +545,7 @@ impl<'p> Vm<'p> {
                 }
             }
         }
-        Frame { dyn_vars: HashMap::new(), undef_mask, locals, st: Vec::with_capacity(16), pc: 0, argc, ctx }
+        Frame { all_args, dyn_vars: HashMap::new(), undef_mask, locals, st: Vec::with_capacity(16), pc: 0, argc, ctx }
     }
 
     fn exec(&mut self, f: &'p Func, args: Vec<Value>, ctx: CallCtx) -> R<Value> {
@@ -761,6 +764,23 @@ impl<'p> Vm<'p> {
                     let path = pop!().to_str();
                     let r = self.include_file(fr, f, &path, kind)?;
                     fr.st.push(r);
+                }
+                Op::FuncArgs(kind) => {
+                    let n = fr.all_args.len();
+                    match kind {
+                        0 => {
+                            let items: Vec<Value> = fr.all_args.iter().map(|v| v.deref()).collect();
+                            fr.st.push(Value::Array(Rc::new(PhpArray::from_list(items))));
+                        }
+                        1 => fr.st.push(Value::Int(n as i64)),
+                        _ => {
+                            let idx = pop!().to_int();
+                            if idx < 0 || idx as usize >= n {
+                                return self.throw_error("ValueError", "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function");
+                            }
+                            fr.st.push(fr.all_args[idx as usize].deref());
+                        }
+                    }
                 }
                 Op::LoadVar => {
                     let name = pop!().to_str();

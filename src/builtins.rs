@@ -1038,6 +1038,19 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
             }),
             ("flush", |_, _| Ok(Value::Null)),
             ("ob_implicit_flush", |_, _| Ok(Value::Null)),
+            ("get_declared_classes", |vm, _| {
+                let mut names: Vec<String> = vm.classes.values().filter(|c| c.kind == crate::ast::ClassKind::Class).map(|c| c.name.clone()).collect();
+                names.sort();
+                Ok(arr(names.iter().map(|n| s(n)).collect()))
+            }),
+            ("get_declared_traits", |vm, _| {
+                let mut names: Vec<String> = vm.classes.values().filter(|c| c.kind == crate::ast::ClassKind::Trait).map(|c| c.name.clone()).collect();
+                names.sort();
+                Ok(arr(names.iter().map(|n| s(n)).collect()))
+            }),
+            ("trait_exists", |vm, a| bool_v(vm.classes.get(&arg(&a, 0).to_str().to_ascii_lowercase()).is_some_and(|c| c.kind == crate::ast::ClassKind::Trait))),
+            ("debug_backtrace", |_, _| Ok(arr(vec![]))),
+            ("debug_print_backtrace", |_, _| Ok(Value::Null)),
             ("gc_collect_cycles", |_, _| Ok(Value::Int(0))),
             ("gc_enable", |_, _| Ok(Value::Null)),
             ("gc_disable", |_, _| Ok(Value::Null)),

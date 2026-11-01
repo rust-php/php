@@ -91,6 +91,8 @@ pub enum Op {
     DefConst(u32),
     Eval,
     Include(u8),
+    /// func_get_args (0), func_num_args (1), func_get_arg (2)
+    FuncArgs(u8),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1086,6 +1088,17 @@ impl Fc<'_> {
                     "eval" => {
                         self.args(args)?;
                         self.emit(Op::Eval);
+                        return Ok(());
+                    }
+                    "func_get_args" | "func_num_args" | "func_get_arg" => {
+                        let n = self.args(args)?;
+                        let kind = match lname.as_str() {
+                            "func_get_args" => 0,
+                            "func_num_args" => 1,
+                            _ => 2,
+                        };
+                        let _ = n;
+                        self.emit(Op::FuncArgs(kind));
                         return Ok(());
                     }
                     "compact" => {
