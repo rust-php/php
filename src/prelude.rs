@@ -69,5 +69,6 @@ interface BackedEnum extends UnitEnum {}
     for (name, parent) in SIMPLE {
         s.push_str(&format!("class {name} extends {parent} {{}}\n"));
     }
+    s.push_str(include_str!("spl.php"));
     s
 }

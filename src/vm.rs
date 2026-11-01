@@ -67,6 +67,9 @@ pub struct Vm<'p> {
     pub classes: HashMap<String, Rc<Class>>,
     pub constants: HashMap<String, Value>,
     pub globals: HashMap<String, Rc<RefCell<Value>>>,
+    pub exception_handler: Option<Value>,
+    pub error_handler: Option<Value>,
+    pub shutdown: Vec<(Value, Vec<Value>)>,
     statics: HashMap<u32, Rc<RefCell<Value>>>,
     depth: usize,
 }
@@ -79,13 +82,29 @@ fn lc(s: &str) -> String {
 
 impl<'p> Vm<'p> {
     pub fn new(prog: &'p Program) -> Self {
-        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), statics: HashMap::new(), depth: 0 }
+        Vm { prog, out: String::new(), file: String::new(), classes: HashMap::new(), constants: HashMap::new(), globals: HashMap::new(), exception_handler: None, error_handler: None, shutdown: Vec::new(), statics: HashMap::new(), depth: 0 }
     }
 
     pub fn run_main(&mut self) -> R<()> {
         self.declare_classes();
         let prog = self.prog;
-        self.exec(&prog.main, vec![], CallCtx::default()).map(|_| ())
+        let mut result = self.exec(&prog.main, vec![], CallCtx::default()).map(|_| ());
+        if let (Err(Flow::Throw(ex)), Some(h)) = (&result, self.exception_handler.take()) {
+            let ex = ex.clone();
+            result = self.call_value(&h, vec![ex]).map(|_| ());
+        }
+        // Shutdown functions run even after exit() or an uncaught exception.
+        let mut i = 0;
+        while i < self.shutdown.len() {
+            let (f, args) = self.shutdown[i].clone();
+            i += 1;
+            match self.call_value(&f, args) {
+                Err(Flow::Exit(_)) => break,
+                Err(e) if result.is_ok() => result = Err(e),
+                _ => {}
+            }
+        }
+        result
     }
 
     // ---- classes ----
@@ -211,6 +230,10 @@ impl<'p> Vm<'p> {
 
     fn class_by_name(&self, name: &str) -> Option<Rc<Class>> {
         self.classes.get(&lc(name)).cloned()
+    }
+
+    pub fn call_thunk(&mut self, func: usize, class: &Rc<Class>) -> R<Value> {
+        self.run_thunk(func, class)
     }
 
     fn run_thunk(&mut self, func: usize, class: &Rc<Class>) -> R<Value> {
@@ -692,6 +715,40 @@ impl<'p> Vm<'p> {
                     let ks = split_args!(n);
                     let keys: Vec<Key> = ks.iter().map(Key::from_value).collect::<Result<_, _>>()?;
                     with_local_mut(&mut fr.locals, slot, |cur| unset_dim(cur, &keys));
+                }
+                Op::UnsetPropDim(shape) => {
+                    let n = prog.shapes[shape as usize].len();
+                    let ks = split_args!(n);
+                    let keys: Vec<Key> = ks.iter().map(Key::from_value).collect::<Result<_, _>>()?;
+                    let name = pop!().to_str();
+                    let obj = pop!();
+                    if let Value::Object(o) = &obj {
+                        if keys.len() == 1 && o.class.find_method("offsetunset").is_some() && o.props.borrow().get(&Key::from_str(&name)).is_none() {
+                            let m = o.class.find_method("offsetunset").unwrap();
+                            self.call_method(&obj, &m, vec![keys[0].to_value()])?;
+                        } else {
+                            let pk = Key::from_str(&name);
+                            let mut cur = o.props.borrow_mut().get_mut(&pk).map(|x| std::mem::replace(x, Value::Null));
+                            if let Some(c) = cur.as_mut() {
+                                unset_dim(c, &keys);
+                            }
+                            if let Some(c) = cur {
+                                o.props.borrow_mut().set(pk, c);
+                            }
+                        }
+                    }
+                }
+                Op::UnsetStaticDim(shape) => {
+                    let n = prog.shapes[shape as usize].len();
+                    let ks = split_args!(n);
+                    let keys: Vec<Key> = ks.iter().map(Key::from_value).collect::<Result<_, _>>()?;
+                    let name = pop!().to_str();
+                    let cv = pop!();
+                    let class = self.class_of(&cv)?;
+                    let owner = self.static_owner(&class, &name)?;
+                    let mut cur = owner.statics.borrow_mut().remove(&*name).unwrap_or(Value::Null);
+                    unset_dim(&mut cur, &keys);
+                    owner.statics.borrow_mut().insert(name.to_string(), cur);
                 }
                 Op::IncDec(slot, inc, prefix) => {
                     let old = get_local(&fr.locals, slot);

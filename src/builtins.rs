@@ -950,6 +950,77 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
             ("assert", |_, _| bool_v(true)),
             ("spl_autoload_register", |_, _| bool_v(true)),
             ("get_called_class", |_, _| bool_v(false)),
+            ("gc_collect_cycles", |_, _| Ok(Value::Int(0))),
+            ("gc_enable", |_, _| Ok(Value::Null)),
+            ("gc_disable", |_, _| Ok(Value::Null)),
+            ("gc_enabled", |_, _| bool_v(true)),
+            ("gc_mem_caches", |_, _| Ok(Value::Int(0))),
+            ("class_alias", |vm, a| {
+                let orig = vm.find_class(&arg(&a, 0).to_str())?;
+                vm.classes.insert(arg(&a, 1).to_str().to_ascii_lowercase(), orig);
+                bool_v(true)
+            }),
+            ("set_exception_handler", |vm, a| {
+                let old = vm.exception_handler.take().unwrap_or(Value::Null);
+                vm.exception_handler = match arg(&a, 0) {
+                    Value::Null => None,
+                    h => Some(h),
+                };
+                Ok(old)
+            }),
+            ("restore_exception_handler", |vm, _| {
+                vm.exception_handler = None;
+                bool_v(true)
+            }),
+            ("set_error_handler", |vm, a| {
+                let old = vm.error_handler.take().unwrap_or(Value::Null);
+                vm.error_handler = match arg(&a, 0) {
+                    Value::Null => None,
+                    h => Some(h),
+                };
+                Ok(old)
+            }),
+            ("restore_error_handler", |vm, _| {
+                vm.error_handler = None;
+                bool_v(true)
+            }),
+            ("register_shutdown_function", |vm, a| {
+                let mut it = a.into_iter();
+                let f = it.next().unwrap_or(Value::Null);
+                vm.shutdown.push((f, it.collect()));
+                Ok(Value::Null)
+            }),
+            ("get_class_vars", |vm, a| {
+                let class = vm.find_class(&arg(&a, 0).to_str())?;
+                let mut out = PhpArray::new();
+                for p in class.props.iter().filter(|p| p.vis == 0) {
+                    let v = match p.thunk {
+                        Some(t) => {
+                            let owner = vm.find_class(&p.class).unwrap_or_else(|_| class.clone());
+                            vm.call_thunk(t, &owner)?
+                        }
+                        None => Value::Null,
+                    };
+                    out.set(Key::from_str(&p.name), v);
+                }
+                Ok(Value::Array(Rc::new(out)))
+            }),
+            ("get_class_methods", |vm, a| {
+                let class = vm.class_of(&arg(&a, 0))?;
+                let mut names: Vec<(usize, String)> = class.methods.values().filter(|m| m.vis == 0).map(|m| (m.func, m.name.clone())).collect();
+                names.sort();
+                Ok(arr(names.into_iter().map(|(_, n)| s(&n)).collect()))
+            }),
+            ("is_iterable", |_, a| bool_v(match arg(&a, 0) {
+                Value::Array(_) => true,
+                Value::Object(o) => o.class.is_a("traversable"),
+                _ => false,
+            })),
+            ("is_countable", |_, a| bool_v(match arg(&a, 0) {
+                Value::Array(_) => true,
+                Value::Object(o) => o.class.is_a("countable"),
+                _ => false,
+            })),
             ("is_object", |_, a| bool_v(matches!(arg(&a, 0), Value::Object(_)))),
             ("get_class", |vm, a| match arg(&a, 0) {
                 Value::Object(o) => Ok(s(&o.class.name)),

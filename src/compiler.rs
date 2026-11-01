@@ -69,6 +69,8 @@ pub enum Op {
     GetStatic,
     AssignStatic,
     AssignStaticDim(u32),
+    UnsetPropDim(u32),
+    UnsetStaticDim(u32),
     InstanceOf,
     Clone,
     MakeClosure(u32, u8),
@@ -538,8 +540,19 @@ impl Fc<'_> {
                         }
                         Expr::Index(..) => {
                             let (base, dims) = flatten(t)?;
-                            let Base::Var(name) = base else { return Err("Cannot unset this array element".into()) };
-                            let slot = self.slot(&name);
+                            let (slot, extra) = match base {
+                                Base::Var(name) => (self.slot(&name), 0u8),
+                                Base::Prop(obj, name) => {
+                                    self.expr(obj)?;
+                                    self.expr(name)?;
+                                    (0, 1)
+                                }
+                                Base::Static(c, name) => {
+                                    self.class_ref(c)?;
+                                    self.push_const(Value::str(name));
+                                    (0, 2)
+                                }
+                            };
                             let mut shape = vec![];
                             for d in dims {
                                 match d {
@@ -551,7 +564,11 @@ impl Fc<'_> {
                                 }
                             }
                             let si = self.shape(shape);
-                            self.emit(Op::UnsetDim(slot, si));
+                            self.emit(match extra {
+                                0 => Op::UnsetDim(slot, si),
+                                1 => Op::UnsetPropDim(si),
+                                _ => Op::UnsetStaticDim(si),
+                            });
                         }
                         Expr::Prop { .. } => {
                             self.assign(t, |c| {
