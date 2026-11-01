@@ -729,7 +729,131 @@ fn localeconv(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
     Ok(Value::Array(std::rc::Rc::new(r)))
 }
 
+
+// ---- hebrev ----
+fn hebrev(vm: &mut Vm<'_>, a: Vec<Value>) -> R<Value> {
+    argc(vm, "hebrev", &a, 1, 2)?;
+    let s = p_str(vm, "hebrev", &a, 0, "string")?;
+    let max_chars = p_int_opt(vm, "hebrev", &a, 1, "max_chars_per_line", 0)?;
+    let str_ = s.as_bytes();
+    let n = str_.len();
+    if n == 0 {
+        return Ok(vstr(""));
+    }
+    let isheb = |c: u8| (224..=250).contains(&c);
+    let isblank = |c: u8| c == b' ' || c == b'\t';
+    let isnewline = |c: u8| c == b'\n' || c == b'\r';
+    let ispunct = |c: u8| c.is_ascii_punctuation();
+    let at = |i: usize| str_.get(i).copied().unwrap_or(0);
+    let mut heb = vec![0u8; n];
+    let mut target = n as i64 - 1;
+    let mut tmp = 0usize;
+    let (mut block_start, mut block_end) = (0usize, 0usize);
+    let mut heb_block = isheb(at(0));
+    loop {
+        if heb_block {
+            while (isheb(at(tmp + 1)) || isblank(at(tmp + 1)) || ispunct(at(tmp + 1)) || at(tmp + 1) == b'\n') && block_end < n - 1 {
+                tmp += 1;
+                block_end += 1;
+            }
+            for i in block_start + 1..=block_end + 1 {
+                let mut c = str_[i - 1];
+                c = match c {
+                    b'(' => b')',
+                    b')' => b'(',
+                    b'[' => b']',
+                    b']' => b'[',
+                    b'{' => b'}',
+                    b'}' => b'{',
+                    b'<' => b'>',
+                    b'>' => b'<',
+                    b'\\' => b'/',
+                    b'/' => b'\\',
+                    o => o,
+                };
+                heb[target as usize] = c;
+                target -= 1;
+            }
+            heb_block = false;
+        } else {
+            while !isheb(at(tmp + 1)) && at(tmp + 1) != b'\n' && block_end < n - 1 {
+                tmp += 1;
+                block_end += 1;
+            }
+            while (isblank(at(tmp)) || ispunct(at(tmp))) && at(tmp) != b'/' && at(tmp) != b'-' && block_end > block_start {
+                tmp -= 1;
+                block_end -= 1;
+            }
+            let mut i = block_end + 1;
+            while i >= block_start + 1 {
+                heb[target as usize] = str_[i - 1];
+                target -= 1;
+                i -= 1;
+            }
+            heb_block = true;
+        }
+        block_start = block_end + 1;
+        if block_end >= n - 1 {
+            break;
+        }
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut begin = n - 1;
+    let mut end = n - 1;
+    loop {
+        let mut char_count: i64 = 0;
+        while (max_chars == 0 || (max_chars > 0 && char_count < max_chars)) && begin > 0 {
+            char_count += 1;
+            begin -= 1;
+            if isnewline(heb[begin]) {
+                while begin > 0 && isnewline(heb[begin - 1]) {
+                    begin -= 1;
+                    char_count += 1;
+                }
+                break;
+            }
+        }
+        if max_chars >= 0 && char_count == max_chars {
+            let mut new_cc = char_count;
+            let mut new_begin = begin;
+            while new_cc > 0 {
+                if isblank(heb[new_begin]) || isnewline(heb[new_begin]) {
+                    break;
+                }
+                new_begin += 1;
+                new_cc -= 1;
+            }
+            if new_cc > 0 {
+                begin = new_begin;
+            }
+        }
+        let orig_begin = begin;
+        if isblank(heb[begin]) {
+            heb[begin] = b'\n';
+        }
+        while begin <= end && isnewline(heb[begin]) {
+            begin += 1;
+        }
+        for i in begin..=end {
+            out.push(heb[i]);
+        }
+        let mut i = orig_begin;
+        while i <= end && isnewline(heb[i]) {
+            out.push(heb[i]);
+            i += 1;
+        }
+        begin = orig_begin;
+        if begin == 0 {
+            break;
+        }
+        begin -= 1;
+        end = begin;
+    }
+    Ok(from_bytes(&out))
+}
+
 pub fn register(m: &mut HashMap<&'static str, VmBuiltin>) {
+    m.insert("hebrev", hebrev);
     m.insert("dirname", dirname);
     m.insert("basename", basename);
     m.insert("chunk_split", chunk_split);
