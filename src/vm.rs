@@ -67,7 +67,7 @@ pub enum Step {
 pub struct Vm<'p> {
     pub prog: &'p Program,
     prog_ptr: *mut Program,
-    included: std::collections::HashSet<String>,
+    pub included: std::collections::HashSet<String>,
     pub out: String,
     pub file: String,
     pub classes: HashMap<String, Rc<Class>>,

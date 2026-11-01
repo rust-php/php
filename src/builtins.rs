@@ -499,6 +499,7 @@ fn table() -> &'static HashMap<&'static str, Builtin> {
         crate::port_string::register(&mut map_all);
         crate::port_array::register(&mut map_all);
         crate::port_var::register(&mut map_all);
+        crate::port_misc::register(&mut map_all);
         map_all
     })
 }
@@ -1196,6 +1197,7 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
         crate::port_array::register_vm(&mut all);
         crate::port_var::register_vm(&mut all);
         crate::port_hash::register_vm(&mut all);
+        crate::port_misc::register_vm(&mut all);
         all
     })
 }
