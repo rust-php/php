@@ -1182,6 +1182,7 @@ fn vm_table() -> &'static HashMap<&'static str, VmBuiltin> {
         crate::port_string::register_vm(&mut all);
         crate::port_array::register_vm(&mut all);
         crate::port_var::register_vm(&mut all);
+        crate::port_hash::register_vm(&mut all);
         all
     })
 }

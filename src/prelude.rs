@@ -75,5 +75,6 @@ interface BackedEnum extends UnitEnum {}
         s.push_str(&format!("class {name} extends {parent} {{}}\n"));
     }
     s.push_str(include_str!("spl.php"));
+    s.push_str(crate::port_hash::PRELUDE);
     s
 }
